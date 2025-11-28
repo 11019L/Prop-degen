@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Degen Prop Challenge</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    body { font-family: Arial; padding: 20px; text-align: center; background: #f0f0f0; }
+    button { background: #0088cc; color: white; border: none; padding: 15px 30px; margin: 10px; border-radius: 8px; font-size: 16px; cursor: pointer; }
+    button:hover { background: #006699; }
+    #qr { margin: 20px; }
+    .tier { display: block; margin: 10px auto; }
+  </style>
+</head>
+<body>
+  <h1>🚀 Degen Prop Challenge</h1>
+  <p>Select tier & pay (virtual = 10x pay)</p>
+  
+  <div id="tiers">
+    <button class="tier" onclick="selectTier(20, 200)">$20 → $200 Virt (Target $460, Bounty $140)</button>
+    <button class="tier" onclick="selectTier(30, 300)">$30 → $300 Virt (Target $690, Bounty $210)</button>
+    <button class="tier" onclick="selectTier(40, 400)">$40 → $400 Virt (Target $920, Bounty $280)</button>
+    <button class="tier" onclick="selectTier(50, 500)">$50 → $500 Virt (Target $1150, Bounty $350)</button>
+  </div>
+  
+  <div id="payment" style="display:none;">
+    <p>Pay $<span id="payAmount"></span> USDT/SOL</p>
+    <div id="qr"></div>
+    <a id="payLink" target="_blank">Click to Pay</a>
+    <br><button onclick="tg.close()">Paid? Bot will confirm auto!</button>
+  </div>
+
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.ready(); tg.expand();
+    let selectedAmount, virtualBalance;
+
+    function selectTier(payAmt, virtBal) {
+      selectedAmount = payAmt;
+      virtualBalance = virtBal;
+      document.getElementById('payAmount').textContent = payAmt;
+      document.getElementById('tiers').style.display = 'none';
+      document.getElementById('payment').style.display = 'block';
+
+      const userId = tg.initDataUnsafe.user.id;
+      const memo = `challenge_${userId}_${payAmt}`;
+      const payUrl = `https://solana.pay/${payAmt}?recipient=${process.env.WALLET_ADDRESS || 'YOUR_WALLET_HERE'}&label=Degen+Challenge+$${payAmt}&memo=${memo}`;
+      document.getElementById('payLink').href = payUrl;
+
+      fetch(`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(payUrl)}`)
+        .then(res => res.blob())
+        .then(blob => document.getElementById('qr').innerHTML = `<img src="${URL.createObjectURL(blob)}" alt="QR">`);
+    }
+
+    tg.MainButton.setText('Close').onClick(() => tg.close()).show();
+  </script>
+</body>
+</html>
