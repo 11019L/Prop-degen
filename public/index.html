@@ -3,57 +3,97 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Degen Prop Challenge</title>
+  <title>Degen Prop</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
-    body { font-family: Arial; padding: 20px; text-align: center; background: #f0f0f0; }
-    button { background: #0088cc; color: white; border: none; padding: 15px 30px; margin: 10px; border-radius: 8px; font-size: 16px; cursor: pointer; }
-    button:hover { background: #006699; }
-    #qr { margin: 20px; }
-    .tier { display: block; margin: 10px auto; }
+    body { margin:0; padding:20px; background:#000; color:#fff; font-family:Arial; text-align:center; }
+    h1 { font-size:28px; margin:0 0 8px; text-shadow:0 0 15px #0f0; }
+    .tiers { display:flex; flex-direction:column; gap:15px; max-width:340px; margin:30px auto 20px; }
+    .tier { background:linear-gradient(135deg,#111,#222); border:2px solid #333; border-radius:16px; padding:22px; font-size:21px; font-weight:bold; color:#0f0; }
+    .tier span { display:block; font-size:16px; color:#aaa; margin-top:6px; font-weight:normal; }
+    #payment { margin-top:40px; display:none; }
+    #qr img { width:240px; height:240px; border:10px solid #111; border-radius:16px; }
+    .wallet { background:#111; padding:12px; border-radius:10px; margin:15px auto; max-width:300px; word-break:break-all; color:#0f0; }
+    .rules-btn { margin-top:25px; background:#222; padding:12px 30px; border-radius:12px; color:#0f0; border:2px solid #0f0; }
+    .modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.9); padding:20px; overflow-y:auto; }
+    .modal-content { background:#111; padding:25px; border-radius:16px; border:2px solid #0f0; max-width:500px; margin:40px auto; }
+    .close { float:right; font-size:30px; cursor:pointer; color:#0f0; }
   </style>
 </head>
 <body>
-  <h1>🚀 Degen Prop Challenge</h1>
-  <p>Select tier & pay (virtual = 10x pay)</p>
-  
-  <div id="tiers">
-    <button class="tier" onclick="selectTier(20, 200)">$20 → $200 Virt (Target $460, Bounty $140)</button>
-    <button class="tier" onclick="selectTier(30, 300)">$30 → $300 Virt (Target $690, Bounty $210)</button>
-    <button class="tier" onclick="selectTier(40, 400)">$40 → $400 Virt (Target $920, Bounty $280)</button>
-    <button class="tier" onclick="selectTier(50, 500)">$50 → $500 Virt (Target $1150, Bounty $350)</button>
+  <h1>DEGEN PROP</h1>
+  <p style="color:#888;">Pay real → get funded account instantly</p>
+
+  <div class="tiers" id="tiers">
+    <div class="tier" onclick="pick(20,200,460,140)">$20 → $200 Account<span>Target $460 · Payout $140</span></div>
+    <div class="tier" onclick="pick(30,300,690,210)">$30 → $300 Account<span>Target $690 · Payout $210</span></div>
+    <div class="tier" onclick="pick(40,400,920,280)">$40 → $400 Account<span>Target $920 · Payout $280</span></div>
+    <div class="tier" onclick="pick(50,500,1150,350)">$50 → $500 Account<span>Target $1150 · Payout $350</span></div>
   </div>
-  
-  <div id="payment" style="display:none;">
-    <p>Pay $<span id="payAmount"></span> USDT/SOL</p>
+
+  <button class="rules-btn" onclick="document.getElementById('rulesModal').style.display='block'">Show Full Rules</button>
+
+  <div id="payment">
+    <h2>Send exactly <span id="amount" style="color:#0f0;"></span></h2>
+    <div class="wallet" id="wallet">Loading...</div>
     <div id="qr"></div>
-    <a id="payLink" target="_blank">Click to Pay</a>
-    <br><button onclick="tg.close()">Paid? Bot will confirm auto!</button>
+    <p style="margin-top:20px; color:#0f0;">Bot confirms automatically in seconds</p>
+  </div>
+
+  <!-- Rules Modal -->
+  <div id="rulesModal" class="modal">
+    <div class="modal-content">
+      <span class="close" onclick="document.getElementById('rulesModal').style.display='none'">×</span>
+      <h2 style="color:#0f0;">OFFICIAL RULES</h2>
+      <ol style="text-align:left; line-height:1.8; color:#ddd;">
+        <li>Entry fee non-refundable</li>
+        <li>10 calendar days maximum</li>
+        <li>No trade in any 48 h = automatic fail</li>
+        <li>Max daily drawdown –12 % from starting balance</li>
+        <li>Max position size 25 % of current balance</li>
+        <li>Cannot buy a coin that pumped >300 % in last 6 h</li>
+        <li>Only first 5 winners per day get paid</li>
+        <li>Max 2 active challenges per person</li>
+        <li>No bots, scripts, or multi-accounting</li>
+        <li>We reserve the right to deny any payout for abuse</li>
+      </ol>
+      <button style="margin-top:20px; padding:12px 30px; background:#0f0; color:#000; border:none; border-radius:12px;" onclick="document.getElementById('rulesModal').style.display='none'">Got it</button>
+    </div>
   </div>
 
   <script>
     const tg = window.Telegram.WebApp;
     tg.ready(); tg.expand();
-    let selectedAmount, virtualBalance;
 
-    function selectTier(payAmt, virtBal) {
-      selectedAmount = payAmt;
-      virtualBalance = virtBal;
-      document.getElementById('payAmount').textContent = payAmt;
+    // ←←←← PUT YOUR REAL WALLET ONCE HERE ←←←←
+    const MY_WALLET = "YOUR_REAL_WALLET_ADDRESS";
+
+    document.getElementById('wallet').textContent = MY_WALLET;
+
+    function pick(pay, balance, target, bounty) {
+      document.getElementById('amount').textContent = '$' + pay;
       document.getElementById('tiers').style.display = 'none';
+      document.querySelector('.rules-btn').style.display = 'none';
       document.getElementById('payment').style.display = 'block';
 
       const userId = tg.initDataUnsafe.user.id;
-      const memo = `challenge_${userId}_${payAmt}`;
-      const payUrl = `https://solana.pay/${payAmt}?recipient=${process.env.WALLET_ADDRESS || 'YOUR_WALLET_HERE'}&label=Degen+Challenge+$${payAmt}&memo=${memo}`;
-      document.getElementById('payLink').href = payUrl;
+      const memo = `challenge_${userId}_${pay}`;
+      const url = `https://solana.pay/${pay}?recipient=${MY_WALLET}&label=DegenProp$${pay}&memo=${encodeURIComponent(memo)}`;
 
-      fetch(`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(payUrl)}`)
-        .then(res => res.blob())
-        .then(blob => document.getElementById('qr').innerHTML = `<img src="${URL.createObjectURL(blob)}" alt="QR">`);
+      fetch(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${url}`)
+        .then(r => r.blob())
+        .then(b => {
+          const img = document.createElement('img');
+          img.src = URL.createObjectURL(b);
+          document.getElementById('qr').innerHTML = '';
+          document.getElementById('qr').appendChild(img);
+        });
+
+      // Auto-open payment link
+      window.open(url, '_blank');
     }
 
-    tg.MainButton.setText('Close').onClick(() => tg.close()).show();
+    tg.MainButton.setText('Close').show().onClick(() => tg.close());
   </script>
 </body>
 </html>
