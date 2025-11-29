@@ -116,6 +116,28 @@ bot.start((ctx) => {
   });
 });
 
+bot.start((ctx) => {
+  ctx.replyWithMarkdownV2(`
+*Welcome to Crucible PROP* 
+
+To start you must:
+1️ Join our channel for live rules, updates & hot coins:
+
+@Crucibleprop
+
+After joining, click the button below to pick your account size
+
+Rules • Payouts • Commands → all inside the channel
+  `, {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "I joined — Start Challenge", web_app: { url: process.env.MINI_APP_URL } }]
+      ]
+    },
+    disable_web_page_preview: true
+  });
+});
+
 bot.command('buy', async (ctx) => {
   const args = ctx.message.text.split(' ').slice(1);
   if (args.length < 2) return ctx.reply('/buy TOKEN USD e.g. /buy WIF 100');
