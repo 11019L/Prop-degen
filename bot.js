@@ -141,6 +141,7 @@ async function getTokenInfo(tokenOrAddress) {
   } catch (e) {
     info.holders = 0;
     info.rugRisk = 'Unknown';
+    info.price = Number(info.price) || 0;
   }
 
   return info;
@@ -289,42 +290,49 @@ bot.command('admin_reset', (ctx) => {
 // BUY ANY COIN BY CONTRACT ADDRESS — works even for brand-new launches
 bot.command('buyca', async (ctx) => {
   const args = ctx.message.text.trim().split(' ');
-  if (args.length < 3) return ctx.reply('Usage: /buyca <contract_address> <usd_amount>\nExample: /buyca AR5RnweDWCk9GN3sRBhurqi39roRs4QCgHu36MZUpump $50');
+  if (args.length < 3) return ctx.reply('Usage: /buyca <address> <amount>\nExample: /buyca 7dD8PjgmmCVm8NrdtYuTkbVjcDxr8nbJMkkyBbM2pump $40');
 
   const user = await getUser(ctx.from.id);
   if (!user.paid || user.failed) return ctx.reply('Start a challenge first!');
 
   const address = args[1];
   const amount = parseFloat(args[2].replace('$', ''));
+  if (isNaN(amount)) return ctx.reply('Invalid amount');
 
   if (amount > user.balance * 0.25) return ctx.reply('Max 25% per position!');
 
   const info = await getTokenInfo(address);
-  if (!info.price) return ctx.reply(`Coin not found yet — wait 10–30 sec or try a different CA. (API lag)`);
+  if (!info.price || info.price <= 0) {
+    return ctx.reply('Coin not found yet — wait 10–30 seconds after launch or try again later.');
+  }
 
   const tokenAmount = amount / info.price;
-  user.positions.push({ token: info.symbol || address.slice(0,6)+'...', address, amount: tokenAmount, buyPrice: info.price });
+
+  user.positions.push({
+    token: info.symbol || address.slice(0, 6) + '...',
+    address: address,
+    amount: tokenAmount,
+    buyPrice: info.price
+  });
   user.balance -= amount;
   await updateUser(ctx.from.id, user);
 
-  const fullInfo = `
-*Token Info:*
+  const msg = `
+Bought $${amount} of ${info.symbol || 'new token'}
+
 Name: ${info.name}
-Symbol: ${info.symbol}
-Price: $${info.price.toFixed(8)}
-Supply: ${info.supply.toFixed(0)}B
-Liquidity: $${info.liquidity.toFixed(0)}
-Holders: ${info.holders}
-Rug Risk: ${info.rugRisk}
+Symbol: ${info.symbol || '—'}
+Price: $${Number(info.price).toFixed(10)}
+Liquidity: $${info.liquidity ? Number(info.liquidity).toFixed(0) : '—'}
+Holders: ${info.holders || '—'}
+Rug Risk: ${info.rugRisk || 'Unknown'}
 
-Bought ${tokenAmount.toFixed(2)} tokens for $${amount}
-Balance left: $${user.balance.toFixed(2)}
-  `;
+New balance: $${user.balance.toFixed(2)}
+  `.trim();
 
-  ctx.replyWithMarkdown(fullInfo);
+  ctx.replyWithMarkdown(msg);
   checkDrawdown(ctx.from.id, ctx);
 });
-
 // Webhook for Auto Payment (Helius)
 app.post('/webhook', async (req, res) => {
   const txs = req.body;
