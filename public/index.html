@@ -14,17 +14,15 @@
     .tiers { display:flex; flex-direction:column; gap:15px; max-width:340px; margin:30px auto 20px; }
     .tier { background:linear-gradient(135deg,#111,#222); border:2px solid #333; border-radius:16px; padding:22px; font-size:21px; font-weight:bold; color:#0f0; cursor:pointer; }
     .tier span { display:block; font-size:16px; color:#aaa; margin-top:6px; font-weight:normal; }
-    #success { display:none; margin-top:30px; }
-    .phrase { background:#111; padding:20px; border-radius:12px; margin:20px auto; maxWfidth:90%; word-wrap:break-word; font-family:monospace; font-size:18px; line-height:1.8; border:2px solid #0f0; }
+    #payment, #success { display:none; margin-top:40px; }
+    .phrase { background:#111; padding:20px; border-radius:12px; margin:20px auto; max-width:90%; word-break:break-all; font-family:monospace; font-size:17px; line-height:1.8; border:2px solid #0f0; }
     .warning { color:#f44; font-weight:bold; margin:20px 0; }
-    .modal, #rulesModal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.9); padding:20px; overflow-y:auto; }
-    .modal-content { background:#111; padding:25px; border-radius:16px; border:2px solid #0f0; max-width:500px; margin:40px auto; }
-    .close { float:right; font-size:30px; cursor:pointer; color:#0f0; }
+    .wallet { background:#111; padding:12px; border-radius:10px; margin:15px auto; max-width:300px; word-break:break-all; color:#0f0; }
   </style>
 </head>
 <body>
   <h1>Crucible PROP</h1>
-  <p style="color:#888;">Where traders are forged</p>
+  <p style="color:#888;">Pay real → get funded account instantly</p>
 
   <div class="tiers" id="tiers">
     <div class="tier" onclick="pick(20,200,460,140)">$20 → $200 Account<span>Target $460 · Payout $140</span></div>
@@ -33,77 +31,69 @@
     <div class="tier" onclick="pick(50,500,1150,350)">$50 → $500 Account<span>Target $1150 · Payout $350</span></div>
   </div>
 
-  <button style="margin-top:25px; background:#222; padding:12px 30px; border-radius:12px; color:#0f0; border:2px solid #0f0;" 
-          onclick="document.getElementById('rulesModal').style.display='block'">Show Full Rules</button>
-
-  <!-- SUCCESS SCREEN – shows ONLY after payment -->
-  <div id="success">
-    <h2 style="color:#0f0;">FUNDED ACCOUNT READY!</h2>
-    <p>Your <strong>12-word</strong> recovery phrase (shown only once):</p>
-    <div class="phrase" id="phrase"></div>
-    <div class="warning">WRITE IT DOWN NOW — disappears forever when you close!</div>
-    <p>Import into Phantom → you will see $<span id="bal"></span> ready to trade.</p>
-    <button onclick="tg.close()" style="margin:30px; padding:15px 40px; background:#0f0; color:#000; border:none; border-radius:12px; font-size:18px;">Close & Start Trading</button>
+  <!-- PAYMENT PAGE -->
+  <div id="payment">
+    <h2>Send exactly <span id="amount" style="color:#0f0;"></span></h2>
+    <div class="wallet" id="wallet">Loading...</div>
+    <div id="qr"></div>
+    <p style="margin-top:20px; color:#0f0;">Payment confirmed → keyphrase appears automatically</p>
   </div>
 
-  <!-- Rules Modal -->
-  <div id="rulesModal" class="modal">
-    <div class="modal-content">
-      <span class="close" onclick="this.parentElement.parentElement.style.display='none'">×</span>
-      <h2 style="color:#0f0;">OFFICIAL RULES</h2>
-      <ol style="text-align:left; line-height:1.8; color:#ddd;">
-        <li>Entry fee non-refundable</li>
-        <li>10 calendar days maximum</li>
-        <li>No trade in any 48 h = automatic fail</li>
-        <li>Max daily drawdown –12 % from starting balance</li>
-        <li>Max position size 25 % of current balance</li>
-        <li>Cannot buy a coin that pumped >300 % in last 6 h</li>
-        <li>Only first 5 winners per day get paid</li>
-        <li>Max 2 active challenges per person</li>
-        <li>No bots, scripts, or multi-accounting</li>
-        <li>We reserve the right to deny any payout for abuse</li>
-      </ol>
-      <button style="margin-top:20px; padding:12px 30px; background:#0f0; color:#000; border:none; border-radius:12px;" 
-              onclick="this.parentElement.parentElement.style.display='none'">Got it</button>
-    </div>
+  <!-- SUCCESS PAGE – shows keyphrase -->
+  <div id="success">
+    <h2 style="color:#0f0;">FUNDED ACCOUNT READY!</h2>
+    <p>Your <strong>12-word</strong> Phantom phrase:</p>
+    <div class="phrase" id="phrase"></div>
+    <div class="warning">SAVE IT NOW – disappears forever on fail!</div>
+    <p>Import into Phantom → $<span id="bal"></span> ready to trade</p>
   </div>
 
   <script>
     const tg = window.Telegram.WebApp;
     tg.ready(); tg.expand();
 
-    async function pick(pay, balance, target, bounty) {
-      // 1. Generate exactly 12-word phrase
-      const mnemonic = bip39.generateMnemonic(128);  // ← 128 bits = 12 words (fixed!)
+    const MY_WALLET = "B4427oKJc3xnQf91kwXHX27u1SsVyB8GDQtc3NBxRtkK";
+    document.getElementById('wallet').textContent = MY_WALLET;
 
-      // 2. Derive Solana wallet
-      const seed = await bip39.mnemonicToSeed(mnemonic);
-      const derivedSeed = ed25519hdkey.derivePath("m/44'/501'/0'/0'", seed).key;
-      const keypair = SolanaWeb3.Keypair.fromSeed(derivedSeed);
+    let selected = null;
 
-      // 3. Send to your bot backend
-      await fetch('https://YOUR-BOT.onrender.com/create-funded-wallet', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: tg.initDataUnsafe.user.id,
-          username: tg.initDataUnsafe.user.username || '',
-          payAmount: pay,
-          virtualBalance: balance,
-          target,
-          bounty,
-          mnemonic,
-          publicKey: keypair.publicKey.toBase58()
-        })
-      });
-
-      // 4. Show success screen with 12-word phrase
+    function pick(pay, balance, target, bounty) {
+      selected = {pay, balance, target, bounty};
+      document.getElementById('amount').textContent = '$' + pay;
       document.getElementById('tiers').style.display = 'none';
-      document.querySelector('button[onclick*="rulesModal"]').style.display = 'none';
-      document.getElementById('phrase').textContent = mnemonic;
-      document.getElementById('bal').textContent = balance.toLocaleString();
-      document.getElementById('success').style.display = 'block';
+      document.getElementById('payment').style.display = 'block';
+
+      const memo = `challenge_${tg.initDataUnsafe.user.id}_${pay}`;
+      const url = `https://solana.pay/${pay}?recipient=${MY_WALLET}&label=Crucible$${pay}&memo=${encodeURIComponent(memo)}`;
+      
+      fetch(`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${url}`)
+        .then(r => r.blob()).then(b => {
+          const img = document.createElement('img');
+          img.src = URL.createObjectURL(b);
+          document.getElementById('qr').innerHTML = '';
+          document.getElementById('qr').appendChild(img);
+        });
+      window.open(url, '_blank');
     }
+
+    // CHECK EVERY 4 SECONDS IF PAID → GENERATE & SHOW + SEND PHRASE
+    setInterval(async () => {
+      if (!selected) return;
+      try {
+        const res = await fetch('https://YOUR-BOT.onrender.com/check-and-generate', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({userId: tg.initDataUnsafe.user.id})
+        });
+        const data = await res.json();
+        if (data.phrase && !document.getElementById('phrase').textContent) {
+          document.getElementById('payment').style.display = 'none';
+          document.getElementById('phrase').textContent = data.phrase;
+          document.getElementById('bal').textContent = selected.balance;
+          document.getElementById('success').style.display = 'block';
+        }
+      } catch(e) {}
+    }, 4000);
   </script>
 </body>
 </html>
