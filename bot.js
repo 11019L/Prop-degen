@@ -178,6 +178,7 @@ bot.command('portfolio', async (ctx) => {
     msg += `${pos.token}: ${pos.amount.toFixed(2)} @ $${pos.buyPrice.toFixed(4)} → $${value.toFixed(2)} (${unreal > 0 ? '+' : ''}$${unreal.toFixed(2)})\n`;
   }
   msg += `\nTotal: $${total.toFixed(2)} / Target: $${user.target}`;
+  msg += `${pos.token || pos.address.slice(0,8)+"..."}: ${pos.amount.toFixed(2)} @ $${pos.buyPrice.toFixed(8)}\n`;
   ctx.reply(msg);
   checkDrawdown(ctx.from.id, ctx);
 });
@@ -214,6 +215,36 @@ bot.command('admin_reset', (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return;
   db.run('DELETE FROM users WHERE user_id=?', [ctx.from.id]);
   ctx.reply('Test challenge deleted');
+});
+
+// BUY ANY COIN BY CONTRACT ADDRESS — works even for brand-new launches
+bot.command('buyca', async (ctx) => {
+  const args = ctx.message.text.trim().split(' ');
+  if (args.length < 3) return ctx.reply('Usage: /buyca <contract_address> <usd_amount>\nExample: /buyca 7xKX... $50');
+
+  const user = await getUser(ctx.from.id);
+  if (!user.paid || user.failed) return ctx.reply('Start a challenge first!');
+
+  const address = args[1];
+  const amount = parseFloat(args[2].replace('$', ''));
+
+  if (amount > user.balance * 0.25) return ctx.reply('Max 25% per position!');
+
+  try {
+    const priceRes = await axios.get(`https://public-api.birdeye.so/defi/price?address=${address}`);
+    const price = priceRes.data.data.value;
+    if (!price) throw new Error();
+
+    const tokenAmount = amount / price;
+    user.positions.push({ token: address.slice(0, 4) + '...', address, amount: tokenAmount, buyPrice: price });
+    user.balance -= amount;
+    await updateUser(ctx.from.id, user);
+
+    ctx.reply(`Bought $${amount} of new coin!\nAddress: ${address}\nPrice: $${price.toFixed(8)}\nBalance left: $${user.balance.toFixed(2)}`);
+    checkDrawdown(ctx.from.id, ctx);
+  } catch (e) {
+    ctx.reply('Coin not found yet — wait 10–30 seconds after launch or check address');
+  }
 });
 
 // Webhook for Auto Payment (Helius)
