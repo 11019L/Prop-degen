@@ -213,31 +213,39 @@ bot.command('sell', async (ctx) => {
 
 bot.command('portfolio', async (ctx) => {
   const user = await getUser(ctx.from.id);
-  if (!user.paid) return ctx.reply('Start a challenge first!');
+  if (!user.paid) return ctx.reply('Start challenge first!');
 
-  let total = user.balance;
-  let msg = `*Portfolio*\nCash: $${user.balance.toFixed(2)}\n\n*Positions:*\n`;
+  let totalEquity = user.balance;
+  let msg = `*PORTFOLIO* 💼\n\n*Cash:* $${user.balance.toFixed(2)}\n\n`;
 
   if (user.positions.length === 0) {
-    msg += "No open trades\n";
+    msg += "No open positions\n";
   } else {
+    msg += "*Open Positions:*\n";
     for (let pos of user.positions) {
-      const price = await getPrice(pos.address || pos.token);
-      const value = pos.amount * price;
-      const pnl = value - (pos.amount * pos.buyPrice);
-      total += value;
-      const symbol = pos.address ? pos.address.slice(0,6)+'...' : pos.token;
-      msg += `${symbol}: ${pos.amount.toFixed(2)} @ $${pos.buyPrice.toFixed(8)}\n → $${value.toFixed(2)} (${pnl > 0 ? '+' : ''}$${pnl.toFixed(2)})\n`;
+      const info = await getTokenInfo(pos.address);
+      const currentValue = pos.amount * info.price;
+      const pnl = currentValue - (pos.amount * pos.buyPrice);
+      const pnlPercent = ((info.price / pos.buyPrice) - 1) * 100;
+      totalEquity += currentValue;
+
+      const emoji = pnl > 0 ? '🟢' : '🔴';
+      msg += `${emoji} *${pos.name || pos.token}*\n`;
+      msg += `   ${pos.amount.toFixed(2)} × $${pos.buyPrice.toFixed(8)} → $${info.price.toFixed(8)}\n`;
+      msg += `   Value: $${currentValue.toFixed(2)} (${pnl > 0 ? '+' : ''}$${pnl.toFixed(2)} | ${pnlPercent.toFixed(1)}%)\n\n`;
     }
   }
 
-  msg += `\n*Total Equity*: $${total.toFixed(2)}\n*Target*: $${user.target.toFixed(0)}`;
+  const dd = user.drawdown ? user.drawdown.toFixed(2) : '0.00';
+  msg += `Total Equity: $${totalEquity.toFixed(2)}\n`;
+  msg += `Target: $${user.target.toFixed(0)}\n`;
+  msg += `Drawdown: ${dd}%\n`;
 
-  if (total >= user.target) {
-    msg += "\n\nWINNER! You hit the target — DM admin for payout!";
+  if (totalEquity >= user.target) {
+    msg += `\nWINNER! You hit the target — DM @admin immediately!`;
   }
 
-  ctx.replyWithMarkdown(msg);
+  ctx.replyWithMarkdownV2(msg.replace(/-/g, '\\-'));
 });
 
 bot.command('rules', (ctx) => {
@@ -290,49 +298,68 @@ bot.command('admin_reset', (ctx) => {
 // BUY ANY COIN BY CONTRACT ADDRESS — works even for brand-new launches
 bot.command('buyca', async (ctx) => {
   const args = ctx.message.text.trim().split(' ');
-  if (args.length < 3) return ctx.reply('Usage: /buyca <address> <amount>\nExample: /buyca 7dD8PjgmmCVm8NrdtYuTkbVjcDxr8nbJMkkyBbM2pump $40');
+  if (args.length < 3) return ctx.reply('Usage: /buyca <mint address> <usd amount>\nExample: /buyca 7dD8PjgmmCVm8NrdtYuTkbVjcDxr8nbJMkkyBbM2pump $50');
 
   const user = await getUser(ctx.from.id);
-  if (!user.paid || user.failed) return ctx.reply('Start a challenge first!');
+  if (!user.paid || user.failed) return ctx.reply('Start a challenge first! Use /start');
 
   const address = args[1];
-  const amount = parseFloat(args[2].replace('$', ''));
-  if (isNaN(amount)) return ctx.reply('Invalid amount');
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address)) return ctx.reply('Invalid Solana address');
 
-  if (amount > user.balance * 0.25) return ctx.reply('Max 25% per position!');
+  const amount = parseFloat(args[2].replace('$', ''));
+  if (isNaN(amount) || amount <= 0) return ctx.reply('Invalid amount');
+  if (amount > user.balance * 0.25) return ctx.reply(`Max 25% per trade! ($${ (user.balance * 0.25).toFixed(2) })`);
+
+  ctx.reply('Fetching token data... (can take 10–60s for new launches)');
 
   const info = await getTokenInfo(address);
+  
+  // CRUCIAL: If price is 0 or undefined → DO NOT allow buy yet
   if (!info.price || info.price <= 0) {
-    return ctx.reply('Coin not found yet — wait 10–30 seconds after launch or try again later.');
+    return ctx.replyWithMarkdown(`
+Token found but *price not available yet*  
+This usually means:
+• Token just launched (wait 15–90 seconds)
+• Still on bonding curve (Pump.fun)
+• Not traded yet
+
+Try again in a minute or use a different token.
+
+Name: ${info.name || 'Unknown'}
+Symbol: ${info.symbol || '—'}
+    `);
   }
 
   const tokenAmount = amount / info.price;
 
   user.positions.push({
-    token: info.symbol || address.slice(0, 6) + '...',
+    token: info.symbol || address.slice(0,6)+'...',
     address: address,
     amount: tokenAmount,
-    buyPrice: info.price
+    buyPrice: info.price,
+    name: info.name || 'Unknown Token'
   });
   user.balance -= amount;
   await updateUser(ctx.from.id, user);
+  await checkDrawdown(ctx.from.id, ctx);
 
-  const msg = `
-Bought $${amount} of ${info.symbol || 'new token'}
+  // Beautiful confirmation card
+  ctx.replyWithMarkdownV2(`
+*BUY EXECUTED*
 
-Name: ${info.name}
-Symbol: ${info.symbol || '—'}
-Price: $${Number(info.price).toFixed(10)}
+${info.name ? `*${info.name}*` : ''} _(${info.symbol || address.slice(0,8)}...)_
+
+Amount: $${amount}
+Tokens received: ${tokenAmount.toFixed(4)}
+Price: $${info.price.toFixed(10)}
 Liquidity: $${info.liquidity ? Number(info.liquidity).toFixed(0) : '—'}
-Holders: ${info.holders || '—'}
-Rug Risk: ${info.rugRisk || 'Unknown'}
+Rug Risk: ${info.rugRisk}
 
-New balance: $${user.balance.toFixed(2)}
-  `.trim();
-
-  ctx.replyWithMarkdown(msg);
-  checkDrawdown(ctx.from.id, ctx);
+New cash balance: $${user.balance.toFixed(2)}
+Use /portfolio to see all positions
+  `.replace(/-/g, '\\-').replace(/_/g, '\\_')); // escape for MDV2
 });
+
 // Webhook for Auto Payment (Helius)
 app.post('/webhook', async (req, res) => {
   const txs = req.body;
