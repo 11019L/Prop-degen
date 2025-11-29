@@ -250,11 +250,11 @@ bot.command('admin_start', async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return;
 
   const amount = parseInt(ctx.message.text.split(' ')[1]) || 20;
-  const balance = amount * 10;        // $20 → $200 etc.
-  target = balance * 2.3;
-  bounty = amount * 7;
+  const balance = amount * 10;
+  const target = balance * 2.3;
+  const bounty = amount * 7;
 
-  // THIS IS THE IMPORTANT PART — completely reset everything
+  // FULL CLEAN RESET + paid=1
   await db.run('DELETE FROM users WHERE user_id = ?', [ctx.from.id]);
   await db.run(`INSERT INTO users (
     user_id, paid, balance, target, bounty, start_date, positions, failed
@@ -262,14 +262,14 @@ bot.command('admin_start', async (ctx) => {
   [ctx.from.id, balance, target, bounty, new Date().toISOString()]);
 
   ctx.replyWithMarkdown(`
-*Admin test account created!*
+*Test account ready!* 
 
 Balance: $${balance}
 Target: $${target.toFixed(0)}
-Payout if you win: $${bounty}
+Payout: $${bounty}
 
-You can now trade safely — no more random fails
-Type /buy WIF 100 to test
+Now you can buy/sell normally
+Try: /buy WIF 100
   `);
 });
 
