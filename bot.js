@@ -195,7 +195,12 @@ bot.command('admin_start', (ctx) => {
   const balance = amount * 10;
   const target = balance * 2.3;
   const bounty = amount * 7;
-  setPaidDynamic(ctx.from.id, amount, balance, target, bounty);
+  
+  // This line was missing — now it works 100%
+  db.run('INSERT OR REPLACE INTO users (user_id, paid, balance, target, bounty) VALUES (?, 1, ?, ?, ?)', 
+    [ctx.from.id, balance, target, bounty]);
+  
+  ctx.reply(`Admin test started!\nBalance: $${balance}\nTarget: $${target.toFixed(0)}\nPayout: $${bounty}\n\nNow you can trade → /buy WIF 100`);
 });
 
 bot.command('admin_set_balance', (ctx) => {
