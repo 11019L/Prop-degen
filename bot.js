@@ -93,13 +93,38 @@ async function checkDrawdown(userId, ctx) {
   await updateUser(userId, user);
 }
 
-async function getPrice(token) {
+async function getPrice(tokenOrAddress) {
+  let price = 0;
+  
+  // Primary: Birdeye (fast for most)
   try {
-    const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${getTokenAddress(token)}`);
-    return res.data.data.value;
+    const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${tokenOrAddress}`);
+    price = res.data.data.value;
+    if (price) return price;
   } catch (e) {
-    return 0.001;  // Fallback
+    console.log('Birdeye lag, falling back...');
   }
+
+  // Fallback 1: Jupiter (great for new tokens, 95% coverage)
+  try {
+    const res = await axios.get(`https://price.jup.ag/v4/price?ids=${tokenOrAddress}`);
+    price = res.data.data[tokenOrAddress]?.price;
+    if (price) return price;
+  } catch (e) {
+    console.log('Jupiter failed, trying DexScreener...');
+  }
+
+  // Fallback 2: DexScreener scrape (indexes launches in <10 sec)
+  try {
+    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenOrAddress}`);
+    price = res.data.pairs[0]?.priceUsd;
+    if (price) return price;
+  } catch (e) {
+    console.log('All APIs failed for ' + tokenOrAddress);
+  }
+
+  // Last resort
+  return 0.0001;  // Tiny price for testing
 }
 
 function getTokenAddress(token) {
@@ -168,19 +193,31 @@ bot.command('sell', async (ctx) => {
 
 bot.command('portfolio', async (ctx) => {
   const user = await getUser(ctx.from.id);
+  if (!user.paid) return ctx.reply('Start a challenge first!');
+
   let total = user.balance;
-  let msg = `💼 Portfolio\nCash: $${user.balance.toFixed(2)}\n\nPositions:\n`;
-  for (let pos of user.positions) {
-    const price = await getPrice(pos.token);
-    const value = pos.amount * price;
-    const unreal = value - (pos.amount * pos.buyPrice);
-    total += value;
-    msg += `${pos.token}: ${pos.amount.toFixed(2)} @ $${pos.buyPrice.toFixed(4)} → $${value.toFixed(2)} (${unreal > 0 ? '+' : ''}$${unreal.toFixed(2)})\n`;
+  let msg = `*Portfolio*\nCash: $${user.balance.toFixed(2)}\n\n*Positions:*\n`;
+
+  if (user.positions.length === 0) {
+    msg += "No open trades\n";
+  } else {
+    for (let pos of user.positions) {
+      const price = await getPrice(pos.address || pos.token);
+      const value = pos.amount * price;
+      const pnl = value - (pos.amount * pos.buyPrice);
+      total += value;
+      const symbol = pos.address ? pos.address.slice(0,6)+'...' : pos.token;
+      msg += `${symbol}: ${pos.amount.toFixed(2)} @ $${pos.buyPrice.toFixed(8)}\n → $${value.toFixed(2)} (${pnl > 0 ? '+' : ''}$${pnl.toFixed(2)})\n`;
+    }
   }
-  msg += `\nTotal: $${total.toFixed(2)} / Target: $${user.target}`;
-  msg += `${pos.token || pos.address.slice(0,8)+"..."}: ${pos.amount.toFixed(2)} @ $${pos.buyPrice.toFixed(8)}\n`;
-  ctx.reply(msg);
-  checkDrawdown(ctx.from.id, ctx);
+
+  msg += `\n*Total Equity*: $${total.toFixed(2)}\n*Target*: $${user.target.toFixed(0)}`;
+
+  if (total >= user.target) {
+    msg += "\n\nWINNER! You hit the target — DM admin for payout!";
+  }
+
+  ctx.replyWithMarkdown(msg);
 });
 
 bot.command('rules', (ctx) => {
