@@ -186,6 +186,31 @@ bot.command('rules', (ctx) => {
   ctx.reply(`📜 Rules:\n1. Pay $20-$50 for virtual balance (10x pay).\n2. Hit 2.3x target.\n3. Fixed bounty payout.\n4. 10 days max.\n5. -12% drawdown = fail.\n6. Max 25% per trade.\n7. 5 winners/day cap.\n8. No bots.\n9. Max 2 active.\n10. Final decision ours.`);
 });
 
+// ——— ADMIN TEST COMMANDS (only you can use) ———
+const ADMIN_ID = parseInt(process.env.ADMIN_ID);  // Your Telegram ID from .env
+
+bot.command('admin_start', (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) return;
+  const amount = parseInt(ctx.message.text.split(' ')[1]) || 20;
+  const balance = amount * 10;
+  const target = balance * 2.3;
+  const bounty = amount * 7;
+  setPaidDynamic(ctx.from.id, amount, balance, target, bounty);
+});
+
+bot.command('admin_set_balance', (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) return;
+  const newBal = parseFloat(ctx.message.text.split(' ')[1]);
+  db.run('UPDATE users SET balance=? WHERE user_id=?', [newBal, ctx.from.id]);
+  ctx.reply(`Balance forced to $${newBal}`);
+});
+
+bot.command('admin_reset', (ctx) => {
+  if (ctx.from.id !== ADMIN_ID) return;
+  db.run('DELETE FROM users WHERE user_id=?', [ctx.from.id]);
+  ctx.reply('Test challenge deleted');
+});
+
 // Webhook for Auto Payment (Helius)
 app.post('/webhook', async (req, res) => {
   const txs = req.body;
