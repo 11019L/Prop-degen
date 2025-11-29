@@ -5,7 +5,7 @@ const axios = require('axios');
 const sqlite3 = require('sqlite3').verbose();
 const bip39 = require('bip39');
 const { derivePath } = require('ed25519-hd-key');
-const { Keypair, PublicKey } = require('@solana/web3.js');
+const { Keypair } = require('@solana/web3.js');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const app = express();
@@ -21,12 +21,12 @@ db.run(`CREATE TABLE IF NOT EXISTS users (
   start_date TEXT,
   mnemonic TEXT,
   publicKey TEXT,
-  failed INTEGER DEFAULT 0   -- 0=active, 1=failed, 2=winner
+  failed INTEGER DEFAULT 0
 )`);
 
 const ADMIN_ID = Number(process.env.ADMIN_ID);
 
-// ===== CREATE FUNDED WALLET (mini app) =====
+// Create funded wallet (called from mini app)
 app.post('/create-funded-wallet', async (req, res) => {
   const { userId, payAmount, virtualBalance, target, bounty, mnemonic, publicKey } = req.body;
 
@@ -35,11 +35,11 @@ app.post('/create-funded-wallet', async (req, res) => {
     VALUES (?, 1, ?, ?, ?, ?, ?, ?, 0)`,
     [userId, virtualBalance, target, bounty, new Date().toISOString(), mnemonic, publicKey]);
 
-  bot.telegram.sendMessage(ADMIN_ID, `New funded account\n$${payAmount} → $${virtualBalance}\nUser: ${userId}\n${publicKey}`);
+  bot.telegram.sendMessage(ADMIN_ID, `New account\n$${payAmount} → $${virtualBalance}\nUser ${userId}`);
   res.json({ok: true});
 });
 
-// ===== GET REAL EQUITY (Birdeye – free tier works) =====
+// Get real wallet equity
 async function getEquity(pubkey) {
   try {
     const r = await axios.get(`https://public-api.birdeye.so/wallet/token_list?address=${pubkey}`, {
@@ -47,12 +47,11 @@ async function getEquity(pubkey) {
     });
     return r.data.data?.total || 0;
   } catch (e) {
-    console.log('Birdeye error:', e.message);
     return 0;
   }
 }
 
-// ===== HELIUS TRANSACTION WEBHOOK (auto fail/win) =====
+// Helius webhook – auto fail/win
 app.post('/tx-webhook', async (req, res) => {
   for (const tx of req.body) {
     const pubkey = tx.feePayer || tx.accountKeys?.[0]?.pubkey;
@@ -70,14 +69,14 @@ app.post('/tx-webhook', async (req, res) => {
     }
     if (equity >= user.target) {
       db.run('UPDATE users SET failed=2, mnemonic=NULL WHERE user_id=?', [user.user_id]);
-      bot.telegram.sendMessage(user.user_id, `WINNER! Hit target – DM admin for $${user.bounty} payout`);
+      bot.telegram.sendMessage(user.user_id, `WINNER! Target hit – DM admin for $${user.bounty} payout`);
     }
   }
   res.send('OK');
 });
 
-// ===== BOT COMMANDS =====
-bot.start(ctx => ctx.replyWithMarkdownV2('*Crucible PROP*\n\nGet your funded Phantom wallet instantly', {
+// Bot commands
+bot.start(ctx => ctx.replyWithMarkdownV2('*Crucible PROP*\n\nGet funded Phantom wallet instantly', {
   reply_markup: { inline_keyboard: [[{ text: "Start Challenge", web_app: { url: process.env.MINI_APP_URL } }]] }
 }));
 
@@ -90,7 +89,7 @@ bot.command('status', async ctx => {
   ctx.replyWithMarkdownV2(`*Status*\nEquity: $${eq.toFixed(2)}\nTarget: $${u.target}\nDrawdown: ${((u.balance-eq)/u.balance*100).toFixed(2)}%`);
 });
 
-// ===== ADMIN TEST WALLET =====
+// Admin instant test wallet
 bot.command('admin_test', async ctx => {
   if (ctx.from.id !== ADMIN_ID) return;
   const mnemonic = bip39.generateMnemonic(160);
@@ -98,12 +97,12 @@ bot.command('admin_test', async ctx => {
   const kp = Keypair.fromSeed(derivePath("m/44'/501'/0'/0'", seed.toString('hex')).key);
   const pub = kp.publicKey.toBase58();
 
-  db.run(`INSERT OR REPLACE INTO users (user_id,paid,balance,target,bounty,start_date,mnemonic,publicKey,failed) VALUES (?,?,500,1150,350,?,?,?,0)`,
+  db.run(`INSERT OR REPLACE INTO users (user_id,paid,balance,target,bounty,start_date,mnemonic,publicKey,failed) 
+          VALUES (?,?,500,1150,350,?,?,?,0)`,
     [ctx.from.id, 1, new Date().toISOString(), mnemonic, pub]);
 
-  ctx.replyWithMarkdownV2(`*TEST ACCOUNT READY*\n\n\`${mnemonic}\`\n\nImport into Phantom → $500 ready`);
+  ctx.replyWithMarkdownV2(`*TEST WALLET READY*\n\n\`${mnemonic}\`\n\nImport into Phantom → $500 ready`);
 });
 
-// ===== START =====
 bot.launch();
-app.listen(process.env.PORT || 3000, () => console.log('Crucible PROP live – Phantom mode'));
+app.listen(process.env.PORT || 3000, () => console.log('Crucible PROP live'));
