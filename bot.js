@@ -246,18 +246,31 @@ bot.command('rules', (ctx) => {
 // ——— ADMIN TEST COMMANDS (only you can use) ———
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);  // Your Telegram ID from .env
 
-bot.command('admin_start', (ctx) => {
+bot.command('admin_start', async (ctx) => {
   if (ctx.from.id !== ADMIN_ID) return;
+
   const amount = parseInt(ctx.message.text.split(' ')[1]) || 20;
-  const balance = amount * 10;
-  const target = balance * 2.3;
-  const bounty = amount * 7;
-  
-  // This line was missing — now it works 100%
-  db.run('INSERT OR REPLACE INTO users (user_id, paid, balance, target, bounty) VALUES (?, 1, ?, ?, ?)', 
-    [ctx.from.id, balance, target, bounty]);
-  
-  ctx.reply(`Admin test started!\nBalance: $${balance}\nTarget: $${target.toFixed(0)}\nPayout: $${bounty}\n\nNow you can trade → /buy WIF 100`);
+  const balance = amount * 10;        // $20 → $200 etc.
+  target = balance * 2.3;
+  bounty = amount * 7;
+
+  // THIS IS THE IMPORTANT PART — completely reset everything
+  await db.run('DELETE FROM users WHERE user_id = ?', [ctx.from.id]);
+  await db.run(`INSERT INTO users (
+    user_id, paid, balance, target, bounty, start_date, positions, failed
+  ) VALUES (?, 1, ?, ?, ?, ?, '[]', 0)`, 
+  [ctx.from.id, balance, target, bounty, new Date().toISOString()]);
+
+  ctx.replyWithMarkdown(`
+*Admin test account created!*
+
+Balance: $${balance}
+Target: $${target.toFixed(0)}
+Payout if you win: $${bounty}
+
+You can now trade safely — no more random fails
+Type /buy WIF 100 to test
+  `);
 });
 
 bot.command('admin_set_balance', (ctx) => {
