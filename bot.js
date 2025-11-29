@@ -109,14 +109,6 @@ function getTokenAddress(token) {
 
 // Commands
 bot.start((ctx) => {
-  ctx.reply('Click "Challenge" to select tier & start!', {
-    reply_markup: {
-      inline_keyboard: [[{ text: '🚀 Start Challenge', web_app: { url: process.env.MINI_APP_URL || 'https://your-mini-app.onrender.com' } }]]
-    }
-  });
-});
-
-bot.start((ctx) => {
   ctx.replyWithMarkdownV2(`
 *Welcome to Crucible PROP* 
 
