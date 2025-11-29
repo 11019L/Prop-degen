@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Crucible PROP</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script src="https://unpkg.com/@solana/web3.js@1.91.0/lib/index.iife.js"></script>
-  <script src="https://unpkg.com/bip39@3.1.0/dist/index.min.js"></script>
-  <script src="https://unpkg.com/ed25519-hd-key@1.3.0/dist/index.js"></script>
+  <script src="https://unpkg.com/@solana/web3.js@1.95.3/lib/index.iife.min.js"></script>
+  <script src="https://unpkg.com/bip39@3.1.0/dist/index.browser.min.js"></script>
+  <script src="https://unpkg.com/ed25519-hd-key@1.3.0/dist/index.min.js"></script>
   <style>
     body { margin:0; padding:20px; background:#000; color:#fff; font-family:Arial; text-align:center; }
     h1 { font-size:28px; margin:0 0 8px; text-shadow:0 0 15px #0f0; }
@@ -15,8 +15,11 @@
     .tier { background:linear-gradient(135deg,#111,#222); border:2px solid #333; border-radius:16px; padding:22px; font-size:21px; font-weight:bold; color:#0f0; cursor:pointer; }
     .tier span { display:block; font-size:16px; color:#aaa; margin-top:6px; font-weight:normal; }
     #success { display:none; margin-top:30px; }
-    .phrase { background:#111; padding:20px; border-radius:12px; margin:20px auto; max-width:90%; word-wrap:break-word; font-family:monospace; font-size:18px; line-height:1.8; border:2px solid #0f0; }
+    .phrase { background:#111; padding:20px; border-radius:12px; margin:20px auto; maxWfidth:90%; word-wrap:break-word; font-family:monospace; font-size:18px; line-height:1.8; border:2px solid #0f0; }
     .warning { color:#f44; font-weight:bold; margin:20px 0; }
+    .modal, #rulesModal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.9); padding:20px; overflow-y:auto; }
+    .modal-content { background:#111; padding:25px; border-radius:16px; border:2px solid #0f0; max-width:500px; margin:40px auto; }
+    .close { float:right; font-size:30px; cursor:pointer; color:#0f0; }
   </style>
 </head>
 <body>
@@ -30,13 +33,39 @@
     <div class="tier" onclick="pick(50,500,1150,350)">$50 → $500 Account<span>Target $1150 · Payout $350</span></div>
   </div>
 
+  <button style="margin-top:25px; background:#222; padding:12px 30px; border-radius:12px; color:#0f0; border:2px solid #0f0;" 
+          onclick="document.getElementById('rulesModal').style.display='block'">Show Full Rules</button>
+
+  <!-- SUCCESS SCREEN – shows ONLY after payment -->
   <div id="success">
     <h2 style="color:#0f0;">FUNDED ACCOUNT READY!</h2>
-    <p>Your 12-word phrase (shown only once):</p>
+    <p>Your <strong>12-word</strong> recovery phrase (shown only once):</p>
     <div class="phrase" id="phrase"></div>
-    <div class="warning">WRITE IT DOWN NOW — it disappears when you close!</div>
-    <p>Import into Phantom → you will see exactly $<span id="bal"></span> ready to trade.</p>
+    <div class="warning">WRITE IT DOWN NOW — disappears forever when you close!</div>
+    <p>Import into Phantom → you will see $<span id="bal"></span> ready to trade.</p>
     <button onclick="tg.close()" style="margin:30px; padding:15px 40px; background:#0f0; color:#000; border:none; border-radius:12px; font-size:18px;">Close & Start Trading</button>
+  </div>
+
+  <!-- Rules Modal -->
+  <div id="rulesModal" class="modal">
+    <div class="modal-content">
+      <span class="close" onclick="this.parentElement.parentElement.style.display='none'">×</span>
+      <h2 style="color:#0f0;">OFFICIAL RULES</h2>
+      <ol style="text-align:left; line-height:1.8; color:#ddd;">
+        <li>Entry fee non-refundable</li>
+        <li>10 calendar days maximum</li>
+        <li>No trade in any 48 h = automatic fail</li>
+        <li>Max daily drawdown –12 % from starting balance</li>
+        <li>Max position size 25 % of current balance</li>
+        <li>Cannot buy a coin that pumped >300 % in last 6 h</li>
+        <li>Only first 5 winners per day get paid</li>
+        <li>Max 2 active challenges per person</li>
+        <li>No bots, scripts, or multi-accounting</li>
+        <li>We reserve the right to deny any payout for abuse</li>
+      </ol>
+      <button style="margin-top:20px; padding:12px 30px; background:#0f0; color:#000; border:none; border-radius:12px;" 
+              onclick="this.parentElement.parentElement.style.display='none'">Got it</button>
+    </div>
   </div>
 
   <script>
@@ -44,27 +73,33 @@
     tg.ready(); tg.expand();
 
     async function pick(pay, balance, target, bounty) {
-      document.getElementById('tiers').style.display = 'none';
+      // 1. Generate exactly 12-word phrase
+      const mnemonic = bip39.generateMnemonic(128);  // ← 128 bits = 12 words (fixed!)
 
-      const mnemonic = bip39.generateMnemonic(160);
+      // 2. Derive Solana wallet
       const seed = await bip39.mnemonicToSeed(mnemonic);
-      const derived = ed25519hdkey.derivePath("m/44'/501'/0'/0'", seed).key;
-      const keypair = SolanaWeb3.Keypair.fromSeed(derived);
+      const derivedSeed = ed25519hdkey.derivePath("m/44'/501'/0'/0'", seed).key;
+      const keypair = SolanaWeb3.Keypair.fromSeed(derivedSeed);
 
-      await fetch('https://prop-degen-11.onrender.com, {
+      // 3. Send to your bot backend
+      await fetch('https://YOUR-BOT.onrender.com/create-funded-wallet', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           userId: tg.initDataUnsafe.user.id,
           username: tg.initDataUnsafe.user.username || '',
           payAmount: pay,
           virtualBalance: balance,
-          target, bounty,
+          target,
+          bounty,
           mnemonic,
           publicKey: keypair.publicKey.toBase58()
         })
       });
 
+      // 4. Show success screen with 12-word phrase
+      document.getElementById('tiers').style.display = 'none';
+      document.querySelector('button[onclick*="rulesModal"]').style.display = 'none';
       document.getElementById('phrase').textContent = mnemonic;
       document.getElementById('bal').textContent = balance.toLocaleString();
       document.getElementById('success').style.display = 'block';
