@@ -93,38 +93,57 @@ async function checkDrawdown(userId, ctx) {
   await updateUser(userId, user);
 }
 
-async function getPrice(tokenOrAddress) {
-  let price = 0;
-  
-  // Primary: Birdeye (fast for most)
-  try {
-    const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${tokenOrAddress}`);
-    price = res.data.data.value;
-    if (price) return price;
-  } catch (e) {
-    console.log('Birdeye lag, falling back...');
-  }
+// UPGRADED: Full Token Info API Chain (price, metadata, liquidity, holders, rug risk)
+async function getTokenInfo(tokenOrAddress) {
+  let info = { price: 0, name: 'Unknown', symbol: '', supply: 0, liquidity: 0, holders: 0, rugRisk: 'Medium' };
 
-  // Fallback 1: Jupiter (great for new tokens, 95% coverage)
+  // 1. Price: Jupiter (fastest for new tokens, 99% coverage)
   try {
     const res = await axios.get(`https://price.jup.ag/v4/price?ids=${tokenOrAddress}`);
-    price = res.data.data[tokenOrAddress]?.price;
-    if (price) return price;
+    info.price = res.data.data[tokenOrAddress]?.price || 0;
   } catch (e) {
-    console.log('Jupiter failed, trying DexScreener...');
+    console.log('Jupiter price fail, trying DexScreener...');
   }
 
-  // Fallback 2: DexScreener scrape (indexes launches in <10 sec)
+  if (!info.price) {
+    try {
+      const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenOrAddress}`);
+      const pair = res.data.pairs[0];
+      info.price = pair?.priceUsd || 0;
+      info.liquidity = pair?.liquidity?.usd || 0;
+    } catch (e) {
+      console.log('DexScreener price fail');
+    }
+  }
+
+  // 2. Metadata: Helius (free, detailed name/symbol/supply)
   try {
-    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${tokenOrAddress}`);
-    price = res.data.pairs[0]?.priceUsd;
-    if (price) return price;
+    const res = await axios.get(`https://api.helius.xyz/v0/tokens/metadata?api-key=${process.env.HELIUS_API_KEY || ''}&mintAccounts=${tokenOrAddress}`);
+    const meta = res.data[0];
+    info.name = meta.name || 'Unknown';
+    info.symbol = meta.symbol || '';
+    info.supply = meta.supply / 1e9 || 0;  // In billions for memes
   } catch (e) {
-    console.log('All APIs failed for ' + tokenOrAddress);
+    console.log('Helius metadata fail, using Birdeye fallback...');
+    try {
+      const res = await axios.get(`https://public-api.birdeye.so/defi/token_overview?address=${tokenOrAddress}`);
+      info.name = res.data.data.name || 'Unknown';
+      info.symbol = res.data.data.symbol || '';
+      info.supply = res.data.data.supply || 0;
+    } catch (e2) {}
   }
 
-  // Last resort
-  return 0.0001;  // Tiny price for testing
+  // 3. Holders & Rug Risk: Quick Helius or fallback calc
+  try {
+    const res = await axios.get(`https://api.helius.xyz/v0/addresses/${tokenOrAddress}/balances?api-key=${process.env.HELIUS_API_KEY || ''}`);
+    info.holders = res.data.length || 0;
+    info.rugRisk = info.holders < 50 ? 'High' : info.liquidity < 10000 ? 'Medium' : 'Low';
+  } catch (e) {
+    info.holders = 0;
+    info.rugRisk = 'Unknown';
+  }
+
+  return info;
 }
 
 function getTokenAddress(token) {
@@ -257,7 +276,7 @@ bot.command('admin_reset', (ctx) => {
 // BUY ANY COIN BY CONTRACT ADDRESS — works even for brand-new launches
 bot.command('buyca', async (ctx) => {
   const args = ctx.message.text.trim().split(' ');
-  if (args.length < 3) return ctx.reply('Usage: /buyca <contract_address> <usd_amount>\nExample: /buyca 7xKX... $50');
+  if (args.length < 3) return ctx.reply('Usage: /buyca <contract_address> <usd_amount>\nExample: /buyca AR5RnweDWCk9GN3sRBhurqi39roRs4QCgHu36MZUpump $50');
 
   const user = await getUser(ctx.from.id);
   if (!user.paid || user.failed) return ctx.reply('Start a challenge first!');
@@ -267,21 +286,30 @@ bot.command('buyca', async (ctx) => {
 
   if (amount > user.balance * 0.25) return ctx.reply('Max 25% per position!');
 
-  try {
-    const priceRes = await axios.get(`https://public-api.birdeye.so/defi/price?address=${address}`);
-    const price = priceRes.data.data.value;
-    if (!price) throw new Error();
+  const info = await getTokenInfo(address);
+  if (!info.price) return ctx.reply(`Coin not found yet — wait 10–30 sec or try a different CA. (API lag)`);
 
-    const tokenAmount = amount / price;
-    user.positions.push({ token: address.slice(0, 4) + '...', address, amount: tokenAmount, buyPrice: price });
-    user.balance -= amount;
-    await updateUser(ctx.from.id, user);
+  const tokenAmount = amount / info.price;
+  user.positions.push({ token: info.symbol || address.slice(0,6)+'...', address, amount: tokenAmount, buyPrice: info.price });
+  user.balance -= amount;
+  await updateUser(ctx.from.id, user);
 
-    ctx.reply(`Bought $${amount} of new coin!\nAddress: ${address}\nPrice: $${price.toFixed(8)}\nBalance left: $${user.balance.toFixed(2)}`);
-    checkDrawdown(ctx.from.id, ctx);
-  } catch (e) {
-    ctx.reply('Coin not found yet — wait 10–30 seconds after launch or check address');
-  }
+  const fullInfo = `
+*Token Info:*
+Name: ${info.name}
+Symbol: ${info.symbol}
+Price: $${info.price.toFixed(8)}
+Supply: ${info.supply.toFixed(0)}B
+Liquidity: $${info.liquidity.toFixed(0)}
+Holders: ${info.holders}
+Rug Risk: ${info.rugRisk}
+
+Bought ${tokenAmount.toFixed(2)} tokens for $${amount}
+Balance left: $${user.balance.toFixed(2)}
+  `;
+
+  ctx.replyWithMarkdown(fullInfo);
+  checkDrawdown(ctx.from.id, ctx);
 });
 
 // Webhook for Auto Payment (Helius)
