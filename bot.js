@@ -205,17 +205,33 @@ async function handleBuy(ctx, ca, amountUSD = null) {
 }
 
 // BUTTONS
+// ==================== BUTTON ACTIONS – FIXED FOREVER ====================
 bot.action(/buy_(\d+)/, async ctx => {
   const amount = Number(ctx.match[1]);
   const ca = ctx.session?.pendingCA;
-  if (ca) await executeBuy(ctx, ca, amount);
+
+  if (!ca) {
+    ctx.answerCbQuery('Error – try again', { show_alert: true });
+    return;
+  }
+
+  // Show instant feedback so the button stops spinning
+  ctx.answerCbQuery('Buying…', { cache_time: 1 });
+
+  try {
+    await executeBuy(ctx, ca, amount);
+  } catch (e) {
+    console.error(e);
+    ctx.reply('Buy failed — try again in 10s');
+  }
+
   delete ctx.session?.pendingCA;
 });
 
 bot.action('buy_custom', ctx => {
   ctx.session.waitingCustom = true;
-  ctx.reply('Send exact amount in $');
-  ctx.answerCbQuery();
+  ctx.reply('Send exact amount in $ (e.g. 75)');
+  ctx.answerCbQuery(); // ← this stops the loading spinner
 });
 
 bot.on('text', async ctx => {
