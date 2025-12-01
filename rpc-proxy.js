@@ -35,23 +35,64 @@ app.post('/', async (req, res) => {
   const pubkey = params[0]?.toString() || params[0];
 
   try {
-    // FAKE SOL BALANCE
+    // 1. FAKE SOL BALANCE
     if (method === 'getBalance' && virtualSol.has(pubkey)) {
       const lamports = Math.floor(virtualSol.get(pubkey) * 1_000_000_000);
-      return res.json({ jsonrpc: '2.0', id, result: { value: lamports, context: { slot: 999999999 } } });
+      return res.json({
+        jsonrpc: '2.0',
+        id: req.body.id,
+        result: { context: { slot: 999999999 }, value: lamports }
+      });
     }
 
-    // FAKE SUCCESS FOR sendTransaction (prevents spam errors)
+    // 2. FAKE ACCOUNT INFO (Backpack needs this or it crashes)
+    if (method === 'getAccountInfo' && virtualSol.has(pubkey)) {
+      const lamports = Math.floor(virtualSol.get(pubkey) * 1_000_000_000);
+      return res.json({
+        jsonrpc: '2.0,
+        id: req.body.id,
+        result: {
+          context: { slot: 999999999 },
+          value: {
+            lamports,
+            owner: "11111111111111111111111111111111",
+            executable: false,
+            rentEpoch: 999999999,
+            data: ["", "base64"],
+            space: 0
+          }
+        }
+      });
+    }
+
+    // 3. FAKE TOKEN ACCOUNTS (this is the one that fixes "Something went wrong")
+    if (method === 'getTokenAccountsByOwner' && virtualSol.has(pubkey)) {
+      return res.json({
+        jsonrpc: '2.0',
+        id: req.body.id,
+        result: {
+          context: { slot: 999999999 },
+          value: [] // empty token list is fine – Backpack just wants the field
+        }
+      });
+    }
+
+    // 4. FAKE sendTransaction (so user doesn’t get errors when trying to trade)
     if (method === 'sendTransaction') {
-      return res.json({ jsonrpc: '2.0', id, result: '1111111111111111111111111111111111111111111111111111111111111111' });
+      return res.json({
+        jsonrpc: '2.0',
+        id: req.body.id,
+        result: '1111111111111111111111111111111111111111111111111111111111111111'
+      });
     }
 
-    // Forward everything else to real RPC
+    // Everything else → forward to real RPC (signature lookups, recent blocks, etc.)
     const r = await axios.post(REAL_RPC, req.body, { timeout: 15000 });
     res.json(r.data);
+
   } catch (e) {
     console.error('RPC error:', e.message);
-    res.json({ jsonrpc: '2.0', id, error: { code: -32603, message: 'Internal error' } });
+    res.json({ jsonrpc: '2.0', id: req.body.id, error: { code: -32603, message: 'Internal error' } });
   }
 });
 
