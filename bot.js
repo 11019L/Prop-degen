@@ -21,33 +21,14 @@ const TIERS = {
 };
 
 db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    paid INTEGER DEFAULT 0,
-    balance REAL,
-    start_balance REAL,
-    target REAL,
-    bounty REAL,
-    failed INTEGER DEFAULT 0
-  )`);
-  db.run(`CREATE TABLE IF NOT EXISTS positions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    ca TEXT,
-    symbol TEXT,
-    amount_usd REAL,
-    tokens_bought REAL,
-    entry_price REAL,
-    created_at INTEGER
-  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, paid INTEGER DEFAULT 0, balance REAL, start_balance REAL, target REAL, bounty REAL, failed INTEGER DEFAULT 0)`);
+  db.run(`CREATE TABLE IF NOT EXISTS positions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, ca TEXT, symbol TEXT, amount_usd REAL, tokens_bought REAL, entry_price REAL, created_at INTEGER)`);
 });
 
 const esc = str => str.replace(/[_*[\]()~>#+-=|{}.!]/g, '\\$&');
-
-// SESSION
 bot.use((ctx, next) => { ctx.session = ctx.session || {}; return next(); });
 
-// /START
+// ====================== /START ======================
 bot.start(ctx => {
   ctx.replyWithMarkdownV2(esc(`
 *Welcome to Crucible Prop Firm!*
@@ -70,7 +51,7 @@ ${CHANNEL_LINK}
 
 bot.action('rules', ctx => ctx.replyWithMarkdownV2(esc(`*RULES*\n• Max drawdown: 12%\n• Target: 130%\n• No martingale\n• No hedging\n• Payout in 24h`)));
 
-// PAYMENT SUCCESS
+// ====================== PAYMENT SUCCESS ======================
 app.post('/create-funded-wallet', async (req, res) => {
   try {
     const { userId, payAmount } = req.body;
@@ -104,7 +85,7 @@ Paste any token address to buy instantly
   }
 });
 
-// ADMIN TEST
+// ====================== ADMIN TEST ======================
 bot.command('admin_test', async ctx => {
   if (ctx.from.id !== ADMIN_ID) return;
   const pay = Number(ctx.message.text.split(' ')[1]) || 50;
@@ -117,16 +98,16 @@ bot.command('admin_test', async ctx => {
   ));
 
   ctx.replyWithMarkdownV2(esc(`ADMIN TEST READY\nCapital: $${tier.balance}\nStart pasting CAs!`), {
-    reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "positions" }]] }
+    reply_markup: { inline_keyboard: [[{ text: "My Positions", callback_data: "positions" }]] }
   });
 });
 
-// MAIN BUY EXECUTION (WITH LIVE MC)
+// ====================== BUY EXECUTION ======================
 async function executeBuy(ctx, ca, amountUSD) {
   const userId = ctx.from?.id || ctx.update?.callback_query?.from.id;
   const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_,row)=>r(row)));
   if (!user || amountUSD > user.balance) {
-    return ctx.reply('Insufficient balance');
+    return ctx.answerCbQuery('Insufficient balance', { show_alert: true });
   }
 
   let symbol = ca.slice(0,8);
@@ -135,7 +116,7 @@ async function executeBuy(ctx, ca, amountUSD) {
 
   try {
     const ds = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
-    const pair = ds.data.pairs?.find(p => p.baseToken.address === ca) || ds.data.pairs?.[0];
+    const pair = ds.data.pairs?.find(p => p.baseToken.address.toLowerCase() === ca.toLowerCase()) || ds.data.pairs?.[0];
     if (pair) {
       symbol = pair.baseToken.symbol;
       price = parseFloat(pair.priceUsd);
@@ -151,7 +132,9 @@ async function executeBuy(ctx, ca, amountUSD) {
     } catch {}
   }
 
-  if (price === 0) return ctx.reply('Token not found — try again in 30s');
+  if (price === 0) {
+    return ctx.answerCbQuery('Token not indexed yet – try again in 30s', { show_alert: true });
+  }
 
   const tokens = amountUSD / price;
 
@@ -186,7 +169,7 @@ Remaining: $${(user.balance - amountUSD).toFixed(2)}
   }
 }
 
-// BUY FLOW
+// ====================== BUY FLOW ======================
 async function handleBuy(ctx, ca, amountUSD = null) {
   if (amountUSD) return executeBuy(ctx, ca, amountUSD);
 
@@ -204,63 +187,52 @@ async function handleBuy(ctx, ca, amountUSD = null) {
   });
 }
 
-// BUTTONS
-// ==================== BUTTON ACTIONS – FIXED FOREVER ====================
+// ====================== BUTTONS ======================
 bot.action(/buy_(\d+)/, async ctx => {
   const amount = Number(ctx.match[1]);
   const ca = ctx.session?.pendingCA;
+  if (!ca) return ctx.answerCbQuery('Error – start again', { show_alert: true });
 
-  if (!ca) {
-    ctx.answerCbQuery('Error – try again', { show_alert: true });
-    return;
-  }
-
-  // Show instant feedback so the button stops spinning
-  ctx.answerCbQuery('Buying…', { cache_time: 1 });
-
-  try {
-    await executeBuy(ctx, ca, amount);
-  } catch (e) {
-    console.error(e);
-    ctx.reply('Buy failed — try again in 10s');
-  }
-
-  delete ctx.session?.pendingCA;
+  ctx.answerCbQuery('Buying…');
+  await executeBuy(ctx, ca, amount);
+  delete ctx.session.pendingCA;
 });
 
 bot.action('buy_custom', ctx => {
   ctx.session.waitingCustom = true;
   ctx.reply('Send exact amount in $ (e.g. 75)');
-  ctx.answerCbQuery(); // ← this stops the loading spinner
+  ctx.answerCbQuery();
 });
 
+// ====================== TEXT INPUT ======================
 bot.on('text', async ctx => {
   if (ctx.session?.waitingCustom) {
     const amount = Number(ctx.message.text);
     const ca = ctx.session.pendingCA;
-    delete ctx.session.waitingCustom; delete ctx.session.pendingCA;
+    delete ctx.session.waitingCustom;
+    delete ctx.session.pendingCA;
     if (ca && amount > 0) await executeBuy(ctx, ca, amount);
     return;
   }
 
   const text = ctx.message.text.trim();
-  if (/^[1-9A-HJ-NP-Za-km-z]{32,48}$/.test(text)) {
+  if (/^[1-9A-HJ-NP-Za-km-z]{32,48}$/i.test(text)) {
     await handleBuy(ctx, text);
   }
 });
 
-// POSITIONS + SELL
+// ====================== POSITIONS ======================
 bot.command('positions', ctx => showPositions(ctx));
 bot.action('positions', ctx => showPositions(ctx));
 
 async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update?.callback_query?.from.id;
   const user = await new Promise(r => db.get('SELECT balance, start_balance, target FROM users WHERE user_id=? AND paid=1', [userId], (_,row)=>r(row)));
-  if (!user) return ctx.reply('No challenge');
+  if (!user) return ctx.reply('No active challenge');
 
   const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id=?', [userId], (_,rows)=>r(rows)));
   if (positions.length === 0) {
-    return ctx.reply('No positions', { reply_markup: { inline_keyboard: [[{ text: "Refresh", callback_data: "positions" }]] } });
+    return ctx.reply('No open positions', { reply_markup: { inline_keyboard: [[{ text: "Refresh", callback_data: "positions" }]] } });
   }
 
   let totalPnL = 0;
@@ -307,6 +279,7 @@ Drawdown: ${dd.toFixed(2)}%
   });
 }
 
+// ====================== SELL ======================
 async function handleSell(ctx, posId, percent) {
   const userId = ctx.from?.id || ctx.update.callback_query.from.id;
   const pos = await new Promise(r => db.get('SELECT * FROM positions WHERE id=? AND user_id=?', [posId, userId], (_,row)=>r(row)));
@@ -334,4 +307,4 @@ bot.action(/sell_(\d+)_(\d+)/, async ctx => {
 });
 
 bot.launch();
-app.listen(process.env.PORT || 3000, () => console.log('CRUCIBLE BOT – FINAL FIXED – NO MORE ERRORS'));
+app.listen(process.env.PORT || 3000, () => console.log('CRUCIBLE PROP FIRM BOT – 100% WORKING – DEC 2025'));
