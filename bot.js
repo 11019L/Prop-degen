@@ -334,4 +334,4 @@ bot.action(/sell_(\d+)_(\d+)/, async ctx => {
 });
 
 bot.launch();
-app.listen(process.env.PORT || 3000, () => console.log('CRUCIBLE PROP FIRM BOT – FINAL PRO VERSION – LIVE 2025'));
+app.listen(process.env.PORT || 3000, () => console.log('CRUCIBLE BOT – FINAL FIXED – NO MORE ERRORS'));
