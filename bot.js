@@ -264,55 +264,79 @@ Remaining: $${(user.balance - amountUSD).toFixed(2)}
 
 // ====================== BUTTON HANDLERS ======================
 bot.action(/buy\|(.+)\|(\d+)/, async (ctx) => {
-  const ca = ctx.match[1];
-  const amount = Number(ctx.match[2]);
+  try {
+    const ca = ctx.match[1];
+    const amount = Number(ctx.match[2]);
+    const userId = ctx.from.id;
 
-  // Only answer once — immediately
-  await ctx.answerCbQuery('Processing…');
+    // One single answer – stops the eternal spinner
+    await ctx.answerCbQuery('Processing…');
 
-  const userId = ctx.from.id;
-  const user = await getUser(userId);
-  if (!user) return ctx.reply('No active challenge');
+    const user = await getUser(userId);
+    if (!user) {
+      return ctx.editMessageText('No active challenge');
+    }
 
-  if (amount > user.balance) {
-    return ctx.editMessageText('❌ Insufficient balance');
-  }
+    if (amount > user.balance) {
+      return ctx.editMessageText('Insufficient balance');
+    }
 
-  const { symbol, price, mc } = await getTokenInfo(ca);
-  if (price === 0) {
-    return ctx.editMessageText('❌ Token not found or no liquidity\nTry again in 30–60s');
-  }
+    const { symbol, price, mc } = await getTokenInfo(ca);
+    if (price === 0) {
+      return ctx.editMessageText('Token not found or no liquidity\nTry again in 30-60 seconds');
+    }
 
-  const tokens = amount / price;
+    const tokens = amount / price;
 
-  // Atomic buy
-  await new Promise(r => {
-    db.run('BEGIN');
-    db.run('INSERT INTO positions ...', [...], err => {
-      if (err) db.run('ROLLBACK');
-      db.run('UPDATE users SET balance = balance - ? ...', [amount, userId], err => {
-        if (err) db.run('ROLLBACK');
-        else db.run('COMMIT');
+    // Atomic transaction – real working code
+    await new Promise((resolve, reject) => {
+      db.serialize(() => {
+        db.run('BEGIN');
+        db.run(
+          `INSERT INTO positions 
+           (user_id, ca, symbol, amount_usd, tokens_bought, tokens_remaining, entry_price, created_at) 
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [userId, ca, symbol, amount, tokens, tokens, price, Date.now()],
+          function (err) {
+            if (err) return db.run('ROLLBACK'), reject(err);
+            db.run(
+              'UPDATE users SET balance = balance - ? WHERE user_id = ?',
+              [amount, userId],
+              function (err) {
+                if (err) return db.run('ROLLBACK'), reject(err);
+                db.run('COMMIT', resolve);
+              }
+            );
+          }
+        );
       });
     });
-  }).catch(() => {});
 
-  const msg = esc(`
-BUY EXECUTED ✅
+    const msg = esc(`
+BUY EXECUTED
 
 ${symbol}
 Size: $${amount}
 Tokens: ${tokens.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
-Entry: $${price.toFixed(10).replace(/\.?0+$/, '')}
+Entry: $${price.toFixed(12).replace(/0+$/, '').replace(/\.$/, '')}
 MC: ${mc}
 
 Remaining: $${(user.balance - amount).toFixed(2)}
-  `);
+    `);
 
-  await ctx.editMessageText(msg, {
-    parse_mode: 'MarkdownV2',
-    reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "positions" }]] }
-  });
+    await ctx.editMessageText(msg, {
+      parse_mode: 'MarkdownV2',
+      reply_markup: {
+        inline_keyboard: [[{ text: "Positions", callback_data: "positions" }]]
+      }
+    });
+
+  } catch (err) {
+    console.error('Buy error:', err);
+    try {
+      await ctx.editMessageText('Buy failed – try again later');
+    } catch {}
+  }
 });
 
 bot.action(/custom\|(.+)/, async ctx => {
