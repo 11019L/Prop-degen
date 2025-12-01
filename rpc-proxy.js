@@ -14,7 +14,7 @@ app.use((req, res, next) => {
   next();
 });
 
-const REAL_RPC = 'https://api.mainnet-beta.solana.com';
+const REAL_RPC = 'https://solana-mainnet.rpc.triton.one/';
 const db = new sqlite3.Database('crucible.db');
 
 const virtualSol = new Map();
