@@ -263,16 +263,56 @@ Remaining: $${(user.balance - amountUSD).toFixed(2)}
 }
 
 // ====================== BUTTON HANDLERS ======================
-bot.action(/buy\|(.+)\|(\d+)/, async ctx => {
-  try {
-    await ctx.answerCbQuery('Buying…');
-    const ca = ctx.match[1];
-    const amount = Number(ctx.match[2]);
-    await executeBuy(ctx, ca, amount);
-  } catch (err) {
-    console.error('Buy error:', err);
-    try { await ctx.answerCbQuery('Buy failed – try again', { show_alert: true }); } catch {}
+bot.action(/buy\|(.+)\|(\d+)/, async (ctx) => {
+  const ca = ctx.match[1];
+  const amount = Number(ctx.match[2]);
+
+  // Only answer once — immediately
+  await ctx.answerCbQuery('Processing…');
+
+  const userId = ctx.from.id;
+  const user = await getUser(userId);
+  if (!user) return ctx.reply('No active challenge');
+
+  if (amount > user.balance) {
+    return ctx.editMessageText('❌ Insufficient balance');
   }
+
+  const { symbol, price, mc } = await getTokenInfo(ca);
+  if (price === 0) {
+    return ctx.editMessageText('❌ Token not found or no liquidity\nTry again in 30–60s');
+  }
+
+  const tokens = amount / price;
+
+  // Atomic buy
+  await new Promise(r => {
+    db.run('BEGIN');
+    db.run('INSERT INTO positions ...', [...], err => {
+      if (err) db.run('ROLLBACK');
+      db.run('UPDATE users SET balance = balance - ? ...', [amount, userId], err => {
+        if (err) db.run('ROLLBACK');
+        else db.run('COMMIT');
+      });
+    });
+  }).catch(() => {});
+
+  const msg = esc(`
+BUY EXECUTED ✅
+
+${symbol}
+Size: $${amount}
+Tokens: ${tokens.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
+Entry: $${price.toFixed(10).replace(/\.?0+$/, '')}
+MC: ${mc}
+
+Remaining: $${(user.balance - amount).toFixed(2)}
+  `);
+
+  await ctx.editMessageText(msg, {
+    parse_mode: 'MarkdownV2',
+    reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "positions" }]] }
+  });
 });
 
 bot.action(/custom\|(.+)/, async ctx => {
