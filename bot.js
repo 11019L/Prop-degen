@@ -11,13 +11,13 @@ app.use(express.json());
 const db = new sqlite3.Database('crucible.db');
 const ADMIN_ID = Number(process.env.ADMIN_ID);
 
-const CHANNEL_LINK = "https://t.me/+yourprivatechannel"; // CHANGE THIS TO YOUR REAL CHANNEL
+const CHANNEL_LINK = "https://t.me/+yourprivatechannel"; // CHANGE THIS
 
 const TIERS = {
-  20: { balance: 200,  target: 460,  bounty: 140 },
-  30: { balance: 300,  target: 690,  bounty: 210 },
-  40: { balance: 400,  target: 920,  bounty: 280 },
-  50: { balance: 500,  target: 1150, bounty: 350 }
+  20: { balance: 200, target: 460, bounty: 140 },
+  30: { balance: 300, target: 690, bounty: 210 },
+  40: { balance: 400, target: 920, bounty: 280 },
+  50: { balance: 500, target: 1150, bounty: 350 }
 };
 
 db.serialize(() => {
@@ -44,9 +44,15 @@ db.serialize(() => {
 
 const esc = str => str.replace(/[_*[\]()~>#+-=|{}.!]/g, '\\$&');
 
+// Session support
+bot.use((ctx, next) => {
+  ctx.session = ctx.session || {};
+  return next();
+});
+
 // ====================== HELPERS ======================
 async function getUser(id) {
-  return new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [id], (_, row) => r(row || null)));
+  return new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1 AND failed = 0', [id], (_, row) => r(row)));
 }
 
 async function getTokenInfo(ca) {
@@ -57,49 +63,49 @@ async function getTokenInfo(ca) {
   try {
     const res = await axios.get(`https://api.dexscreener.com/latest/dex/pairs/solana/${ca}`, { timeout: 8000 });
     const pair = res.data.pair;
-    if (pair) {
+    if (pair && pair.baseToken) {
       symbol = pair.baseToken.symbol;
-      price = parseFloat(pair.priceUsd);
+      price = parseFloat(pair.priceUsd) || 0;
       mc = pair.fdv ? `$${(pair.fdv / 1000000).toFixed(2)}M` : 'N/A';
     }
-  } catch {
+  } catch (e) {
     try {
       const bd = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
         headers: { 'x-api-key': process.env.BIRDEYE_KEY || '' }
       });
       if (bd.data.success) {
-        price = bd.data.data.value;
+        price = bd.data.data.value || 0;
         symbol = bd.data.data.symbol || symbol;
       }
     } catch {}
   }
-  return { symbol, price: price || 0, mc };
+  return { symbol, price, mc };
 }
 
-// ====================== /START ======================
+// ====================== START ======================
 bot.start(ctx => {
   ctx.replyWithMarkdownV2(esc(`
 *Welcome to Crucible Prop Firm!*
 
-Join our private channel first (required):
+Join our private channel first:
 ${CHANNEL_LINK}
   `), {
     reply_markup: {
       inline_keyboard: [
         [{ text: "Join Channel", url: CHANNEL_LINK }],
-        [{ text: "$20 → $200 in SOL", web_app: { url: process.env.MINI_APP_URL + '?tier=20' } }],
-        [{ text: "$30 → $300 in SOL", web_app: { url: process.env.MINI_APP_URL + '?tier=30' } }],
-        [{ text: "$40 → $400 in SOL", web_app: { url: process.env.MINI_APP_URL + '?tier=40' } }],
-        [{ text: "$50 → $500 in SOL", web_app: { url: process.env.MINI_APP_URL + '?tier=50' } }],
+        [{ text: "$20 → $200", web_app: { url: process.env.MINI_APP_URL + '?tier=20' } }],
+        [{ text: "$30 → $300", web_app: { url: process.env.MINI_APP_URL + '?tier=30' } }],
+        [{ text: "$40 → $400", web_app: { url: process.env.MINI_APP_URL + '?tier=40' } }],
+        [{ text: "$50 → $500", web_app: { url: process.env.MINI_APP_URL + '?tier=50' } }],
         [{ text: "Rules", callback_data: "rules" }]
       ]
     }
   });
 });
 
-bot.action('rules', ctx => ctx.replyWithMarkdownV2(esc(`*CRUCIBLE RULES*\n• Max drawdown: 12%\n• Profit target: 130%\n• No martingale / revenge trading\n• No hedging\n• Max 1 account\n• Inactivity >7 days = fail\n• Payout within 24h`)));
+bot.action('rules', ctx => ctx.replyWithMarkdownV2(esc(`*RULES*\n• Max drawdown: 12%\n• Target: 130%\n• No martingale\n• No hedging\n• Payout in 24h`)));
 
-// ====================== PAYMENT SUCCESS ======================
+// ====================== PAYMENT ======================
 app.post('/create-funded-wallet', async (req, res) => {
   try {
     const { userId, payAmount } = req.body;
@@ -107,8 +113,7 @@ app.post('/create-funded-wallet', async (req, res) => {
     if (!tier) return res.status(400).json({ok: false});
 
     await new Promise(r => db.run(
-      `INSERT OR REPLACE INTO users (user_id, paid, balance, start_balance, target, bounty, failed)
-       VALUES (?, 1, ?, ?, ?, ?, 0)`,
+      `INSERT OR REPLACE INTO users (user_id, paid, balance, start_balance, target, bounty, failed) VALUES (?, 1, ?, ?, ?, ?, 0)`,
       [userId, tier.balance, tier.balance, tier.target, tier.bounty], () => r()
     ));
 
@@ -118,13 +123,12 @@ CHALLENGE STARTED
 
 Capital: $${tier.balance}
 Target: $${tier.target}
-Payout: $${tier.bounty}
 Max DD: 12%
 
-Paste any token address to buy instantly
+Paste any token address to buy
     `), {
       parse_mode: 'MarkdownV2',
-      reply_markup: { inline_keyboard: [[{ text: "My Positions", callback_data: "positions" }]] }
+      reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "positions" }]] }
     });
 
     res.json({ok: true});
@@ -141,12 +145,11 @@ bot.command('admin_test', async ctx => {
   const tier = TIERS[pay] || TIERS[50];
 
   await new Promise(r => db.run(
-    `INSERT OR REPLACE INTO users (user_id, paid, balance, start_balance, target, bounty, failed)
-     VALUES (?, 1, ?, ?, ?, ?, 0)`,
+    `INSERT OR REPLACE INTO users (user_id, paid, balance, start_balance, target, bounty, failed) VALUES (?, 1, ?, ?, ?, ?, 0)`,
     [ctx.from.id, tier.balance, tier.balance, tier.target, tier.bounty], () => r()
   ));
 
-  ctx.replyWithMarkdownV2(esc(`ADMIN TEST READY\nCapital: $${tier.balance}\nStart pasting CAs!`), {
+  ctx.replyWithMarkdownV2(esc(`ADMIN TEST READY\nCapital: $${tier.balance}\nPaste CAs to trade!`), {
     reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "positions" }]] }
   });
 });
@@ -167,19 +170,24 @@ async function handleBuy(ctx, ca) {
   });
 }
 
+// ====================== EXECUTE BUY ======================
 async function executeBuy(ctx, ca, amountUSD) {
   const userId = ctx.from?.id || ctx.update?.callback_query?.from.id;
   const user = await getUser(userId);
-  if (!user || amountUSD > user.balance) return ctx.answerCbQuery('Insufficient balance', { show_alert: true });
+  if (!user || amountUSD > user.balance) {
+    return ctx.answerCbQuery('Insufficient balance', { show_alert: true });
+  }
 
   const { symbol, price, mc } = await getTokenInfo(ca);
-  if (price === 0) return ctx.answerCbQuery('Token not found – try again in 30s', { show_alert: true });
+  if (price === 0) {
+    return ctx.answerCbQuery('Token not found – try again in 30s', { show_alert: true });
+  }
 
   const tokens = amountUSD / price;
 
   await new Promise(r => db.run('INSERT INTO positions (user_id, ca, symbol, amount_usd, tokens_bought, entry_price, created_at) VALUES (?,?,?,?,?,?,?)',
     [userId, ca, symbol, amountUSD, tokens, price, Date.now()], r));
-  await new Promise(r => db.run('UPDATE users SET balance = balance - ? WHERE user_id=?', [amountUSD, userId], r));
+  await new Promise(r => db.run('UPDATE users SET balance = balance - ? WHERE user_id = ?', [amountUSD, userId], r));
 
   const updatedUser = await getUser(userId);
 
@@ -189,17 +197,17 @@ BUY EXECUTED
 ${symbol}
 Size: $${amountUSD}
 Tokens: ${tokens.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
-Price: $${price.toFixed(10).replace(/\.?0+$/, '')}
+Price: $${price.toFixed(10).replace(/\.?0+$/g, '')}
 MC: ${mc}
 
 Remaining: $${updatedUser.balance.toFixed(2)}
   `);
 
   if (ctx.update?.callback_query) {
-    ctx.editMessageText(msg, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: "My Positions", callback_data: "positions" }]] } });
+    ctx.editMessageText(msg, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "positions" }]] } });
     ctx.answerCbQuery('Bought!');
   } else {
-    ctx.replyWithMarkdownV2(msg, { reply_markup: { inline_keyboard: [[{ text: "My Positions", callback_data: "positions" }]] } });
+    ctx.replyWithMarkdownV2(msg, { reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "positions" }]] } });
   }
 }
 
@@ -212,13 +220,12 @@ bot.action(/buy\|(.+)\|(\d+)/, async ctx => {
 });
 
 bot.action(/custom\|(.+)/, ctx => {
-  ctx.session = ctx.session || {};
   ctx.session.customCA = ctx.match[1];
   ctx.reply('Send amount in $');
   ctx.answerCbQuery();
 });
 
-// ====================== TEXT INPUT ======================
+// ====================== TEXT HANDLER ======================
 bot.on('text', async ctx => {
   if (ctx.session?.customCA) {
     const amount = Number(ctx.message.text);
@@ -235,17 +242,14 @@ bot.on('text', async ctx => {
 });
 
 // ====================== POSITIONS ======================
-bot.command('positions', ctx => showPositions(ctx));
-bot.action('positions', ctx => showPositions(ctx));
-
 async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update?.callback_query?.from.id;
   const user = await getUser(userId);
   if (!user) return ctx.reply('No active challenge');
 
-  const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id=?', [userId], (_, rows) => r(rows)));
+  const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows)));
   if (positions.length === 0) {
-    return ctx.reply('No open positions', { reply_markup: { inline_keyboard: [[{ text: "Refresh", callback_data: "positions" }]] } });
+    return ctx.reply('No positions', { reply_markup: { inline_keyboard: [[{ text: "Refresh", callback_data: "positions" }]] } });
   }
 
   let totalPnL = 0;
@@ -269,29 +273,32 @@ async function showPositions(ctx) {
   const dd = ((user.start_balance - equity) / user.start_balance) * 100;
 
   if (dd > 12) {
-    await new Promise(r => db.run('UPDATE users SET failed=1 WHERE user_id=?', [userId], r));
+    await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
     return ctx.reply('CHALLENGE FAILED — Drawdown >12%');
   }
   if (equity >= user.target) {
-    await new Promise(r => db.run('UPDATE users SET failed=2 WHERE user_id=?', [userId], r));
-    return ctx.reply(`WINNER! Equity $${equity.toFixed(2)} — DM admin`);
+    await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
+    return ctx.reply(`WINNER! Equity: $${equity.toFixed(2)} — DM admin`);
   }
 
   ctx.replyWithMarkdownV2(esc(`
 LIVE POSITIONS
 
 Equity: $${equity.toFixed(2)}
-Unrealized PnL: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
+PnL: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
 Drawdown: ${dd.toFixed(2)}%
   `), {
     reply_markup: { inline_keyboard: [...buttons, [{ text: "Refresh", callback_data: "positions" }]] }
   });
 }
 
+bot.command('positions', ctx => showPositions(ctx));
+bot.action('positions', ctx => showPositions(ctx));
+
 // ====================== SELL ======================
 async function handleSell(ctx, posId, percent) {
-  const userId = ctx.from?.id || ctx.update.callback_query.from.id;
-  const pos = await new Promise(r => db.get('SELECT * FROM positions WHERE id=? AND user_id=?', [posId, userId], (_, row) => r(row)));
+  const userId = ctx.from?.id || ctx.update?.callback_query?.from.id;
+  const pos = await new Promise(r => db.get('SELECT * FROM positions WHERE id = ? AND user_id = ?', [posId, userId], (_, row) => r(row)));
   if (!pos) return;
 
   const { price } = await getTokenInfo(pos.ca);
@@ -299,8 +306,8 @@ async function handleSell(ctx, posId, percent) {
   const pnl = (curPrice - pos.entry_price) * pos.tokens_bought * (percent / 100);
   const sellUSD = pos.amount_usd * (percent / 100);
 
-  await new Promise(r => db.run('UPDATE users SET balance = balance + ? WHERE user_id=?', [sellUSD + pnl, userId], r));
-  if (percent === 100) await new Promise(r => db.run('DELETE FROM positions WHERE id=?', [posId], r));
+  await new Promise(r => db.run('UPDATE users SET balance = balance + ? WHERE user_id = ?', [sellUSD + pnl, userId], r));
+  if (percent === 100) await new Promise(r => db.run('DELETE FROM positions WHERE id = ?', [posId], r));
 
   ctx.replyWithMarkdownV2(esc(`SELL ${percent}% DONE\n${pos.symbol}\nPnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`));
   showPositions(ctx);
@@ -312,4 +319,4 @@ bot.action(/sell_(\d+)_(\d+)/, async ctx => {
 });
 
 bot.launch();
-app.listen(process.env.PORT || 3000, () => console.log('CRUCIBLE PROP FIRM BOT – FINAL 100% PERFECT – DEC 2025'));
+app.listen(process.env.PORT || 3000, () => console.log('CRUCIBLE BOT – FINAL 100% WORKING – DEC 2025'));
