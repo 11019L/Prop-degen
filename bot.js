@@ -83,6 +83,20 @@ bot.action('rules', ctx => {
 
 Violation = permanent ban
   `));
+// Quick amount buttons
+bot.action(/amt_(\d+)/, async ctx => {
+  const amount = Number(ctx.match[1]);
+  const ca = ctx.session?.waitingForAmount?.ca;
+  if (ca) await handleBuy(ctx, ca, amount);
+  delete ctx.session?.waitingForAmount;
+  ctx.answerCbQuery();
+});
+
+bot.action('amt_custom', ctx => {
+  ctx.session.waitingForAmount = ctx.session.waitingForAmount || {};
+  ctx.reply('Send the exact amount in $');
+  ctx.answerCbQuery();
+});
 });
 
 // PAYMENT SUCCESS
@@ -150,8 +164,21 @@ async function handleBuy(ctx, ca, amountUSD = null) {
   const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_, row) => r(row)));
   if (!user) return ctx.reply('No active challenge');
 
-  if (!amountUSD) {
-    return ctx.reply(`How much $ to buy? (max $${user.balance})`, { reply_markup: { force_reply: true } });
+    if (!amountUSD) {
+    // NEW: we store the CA in session and wait for the next message
+    ctx.session = ctx.session || {};
+    ctx.session.waitingForAmount = { ca };
+    return ctx.reply(`How much $ do you want to buy this coin for?\nAvailable: $${user.balance}`, {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "$20", callback_data: "amt_20" }],
+          [{ text: "$50", callback_data: "amt_50" }],
+          [{ text:w
+          [{ text: "$100", callback_data: "amt_100" }],
+          [{ text: "Custom amount", callback_data: "amt_custom" }]
+        ]
+      }
+    });
   }
   if (amountUSD > user.balance || amountUSD <= 0) return ctx.reply('Invalid amount');
 
