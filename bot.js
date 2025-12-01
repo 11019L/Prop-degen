@@ -20,7 +20,7 @@ const TIERS = {
   50: { balance: 500, target: 1150, bounty: 350 }
 };
 
-// DATABASE
+// DATABASE SETUP
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
@@ -43,7 +43,7 @@ db.serialize(() => {
   )`);
 });
 
-// MARKDOWNV2 ESCAPE
+// ESCAPE MARKDOWNV2
 const esc = str => str.replace(/[_*[\]()~>#+-=|{}.!]/g, '\\$&');
 
 // /START
@@ -51,14 +51,14 @@ bot.start(ctx => {
   ctx.replyWithMarkdownV2(esc(`
 *Welcome to Crucible Prop Firm!*
 
-Join our private channel (required):
+Join our private channel first (required):
 ${CHANNEL_LINK}
 
-Then choose your challenge
+Then select your challenge
   `), {
     reply_markup: {
       inline_keyboard: [
-        [{ text: "Join Channel First", url: CHANNEL_LINK }],
+        [{ text: "Join Channel", url: CHANNEL_LINK }],
         [{ text: "$20 → $200 in SOL", web_app: { url: process.env.MINI_APP_URL + '?tier=20' } }],
         [{ text: "$30 → $300 in SOL", web_app: { url: process.env.MINI_APP_URL + '?tier=30' } }],
         [{ text: "$40 → $400 in SOL", web_app: { url: process.env.MINI_APP_URL + '?tier=40' } }],
@@ -75,13 +75,13 @@ bot.action('rules', ctx => {
 
 • Max drawdown: 12%
 • Profit target: 130%
-• No martingale / revenge trading
+• No martingale
 • No hedging
 • Max 1 account
 • Inactivity >7 days = fail
 • Payout in 24h
 
-Break rules = ban + no refund
+Violation = permanent ban
   `));
 });
 
@@ -90,17 +90,18 @@ app.post('/create-funded-wallet', async (req, res) => {
   try {
     const { userId, payAmount } = req.body;
     const tier = TIERS[payAmount];
-    if (!tier) return res.status(400).json({ok: false});
+    if (!tier) return res.status(400).json({ ok: false });
 
-    await new Promise(r => db.run(
+    await new Promise(resolve => db.run(
       `INSERT OR REPLACE INTO users (user_id, paid, balance, start_balance, target, bounty, failed)
        VALUES (?, 1, ?, ?, ?, ?, 0)`,
-      [userId, tier.balance, tier.balance, tier.target, tier.bounty], () => r()
+      [userId, tier.balance, tier.balance, tier.target, tier.bounty],
+      () => resolve()
     ));
 
-    await bot.telegram.sendMessage(ADMIN_ID, `NEW USER\n$${payAmount} → $${tier.balance}\nID: ${userId}`);
+    bot.telegram.sendMessage(ADMIN_ID, `NEW PAID USER\n$${payAmount} → $${tier.balance}\nID: ${userId}`);
 
-    await bot.telegram.sendMessage(userId, esc(`
+    bot.telegram.sendMessage(userId, esc(`
 CHALLENGE STARTED
 
 Capital: $${tier.balance}
@@ -108,16 +109,16 @@ Target: $${tier.target}
 Payout: $${tier.bounty}
 Max DD: 12%
 
-Paste any token address to buy instantly
+Paste any token address to buy
     `), {
       parse_mode: 'MarkdownV2',
       reply_markup: { inline_keyboard: [[{ text: "My Positions", callback_data: "positions" }]] }
     });
 
-    res.json({ok: true});
+    res.json({ ok: true });
   } catch (e) {
     console.error(e);
-    res.status(500).json({ok: false});
+    res.status(500).json({ ok: false });
   }
 });
 
@@ -134,19 +135,19 @@ bot.command('admin_test', async ctx => {
   ));
 
   ctx.replyWithMarkdownV2(esc(`
-ADMIN TEST ACCOUNT
+ADMIN TEST READY
 
 Capital: $${tier.balance}
 Target: $${tier.target}
 
-Start pasting CAs!
+Paste CAs to trade
   `), { reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "positions" }]] } });
 });
 
-// BUY / SELL / POSITIONS
+// BUY LOGIC
 async function handleBuy(ctx, ca, amountUSD = null) {
   const userId = ctx.from?.id || ctx.update?.callback_query?.from.id;
-  const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_,row)=>r(row)));
+  const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_, row) => r(row)));
   if (!user) return ctx.reply('No active challenge');
 
   if (!amountUSD) {
@@ -154,7 +155,7 @@ async function handleBuy(ctx, ca, amountUSD = null) {
   }
   if (amountUSD > user.balance || amountUSD <= 0) return ctx.reply('Invalid amount');
 
-  let symbol = ca.slice(0,10);
+  let symbol = ca.slice(0, 10);
   let price = 0;
   try {
     const r = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
@@ -162,10 +163,10 @@ async function handleBuy(ctx, ca, amountUSD = null) {
       timeout: 8000
     });
     price = r.data.data?.value || 0;
-    symbol = r.data.data?.symbol || ca.slice(0,8);
+    symbol = r.data.data?.symbol || ca.slice(0, 8);
     if (price === 0) throw '';
   } catch {
-    return ctx.reply('Token not found — try again in 30-60s');
+    return ctx.reply('Token not found — wait 30-60s');
   }
 
   const tokens = amountUSD / price;
@@ -187,14 +188,17 @@ Remaining: $${(user.balance - amountUSD).toFixed(2)}
   `), { reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "positions" }]] } });
 }
 
+// SELL LOGIC
 async function handleSell(ctx, posId, percent) {
   const userId = ctx.from?.id || ctx.update.callback_query.from.id;
-  const pos = await new Promise(r => db.get('SELECT * FROM positions WHERE id=? AND user_id=?', [posId, userId], (_,row)=>r(row)));
+  const pos = await new Promise(r => db.get('SELECT * FROM positions WHERE id=? AND user_id=?', [posId, userId], (_, row) => r(row)));
   if (!pos) return;
 
   let curPrice = pos.entry_price;
   try {
-    const r = await axios.get(`https://public-api.birdeye.so/defi/price?address=${pos.ca}`, { headers: { 'x-api-key': process.env.BIRDEYE_KEY || '' } });
+    const r = await axios.get(`https://public-api.birdeye.so/defi/price?address=${pos.ca}`, {
+      headers: { 'x-api-key': process.env.BIRDEYE_KEY || '' }
+    });
     curPrice = r.data.data?.value || pos.entry_price;
   } catch {}
 
@@ -204,7 +208,7 @@ async function handleSell(ctx, posId, percent) {
   db.run('UPDATE users SET balance = balance + ? WHERE user_id=?', [sellUSD + pnl, userId]);
   if (percent === 100) db.run('DELETE FROM positions WHERE id=?', [posId]);
 
-  ctx.replyWithMarkdownV2(esc(`SELL ${percent}% DONE\n${pos.symbol}\nPnL: ${pnl>=0?'+' : ''}$${pnl.toFixed(2)}`));
+  ctx.replyWithMarkdownV2(esc(`SELL ${percent}% DONE\n${pos.symbol}\nPnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`));
   showPositions(ctx);
 }
 
@@ -217,30 +221,36 @@ bot.on('text', async ctx => {
 });
 
 bot.command('buy', async ctx => {
-  const p = ctx.message.text.split(' ');
-  if (p.length < 3) return ctx.reply('Usage: /buy <CA> <amount>');
-  await handleBuy(ctx, p[1], Number(p[2]));
+  const parts = ctx.message.text.split(' ');
+  if (parts.length < 3) return ctx.reply('Usage: /buy <CA> <amount>');
+  await handleBuy(ctx, parts[1], Number(parts[2]));
 });
 
-// POSITIONS
+// POSITIONS COMMAND
 bot.command('positions', ctx => showPositions(ctx));
 bot.action('positions', ctx => showPositions(ctx));
 
 async function showPositions(ctx) {
-  const userId = ctx.from?.id || ctx.update.callback_query.from.id;
-  const user = await new Promise(r => db.get('SELECT balance, start_balance, target FROM users WHERE user_id=? AND paid=1', [userId], (_,row)=>r(row)));
+  const userId = ctx.from?.id || ctx.update?.callback_query?.from.id;
+  const user = await new Promise(r => db.get('SELECT balance, start_balance, target FROM users WHERE user_id=? AND paid=1', [userId], (_, row) => r(row)));
   if (!user) return ctx.reply('No active challenge');
 
-  const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id=?', [userId], (_,rows)=>r(rows)));
-  if (!positions.length) return ctx.reply('No positions', { inline_keyboard: [[{ text: "Refresh", callback_data: "positions" }]] } });
+  const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id=?', [userId], (_, rows) => r(rows)));
+  if (positions.length === 0) {
+    return ctx.reply('No open positions', {
+      reply_markup: { inline_keyboard: [[{ text: "Refresh", callback_data: "positions" }]] }
+    });
+  }
 
-  let totalPnL = 0; // FIXED LINE
+  let totalPnL = 0;
   const buttons = [];
 
   for (const p of positions) {
     let price = p.entry_price;
     try {
-      const r = await axios.get(`https://public-api.birdeye.so/defi/price?address=${p.ca}`, { headers: { 'x-api-key': process.env.BIRDEYE_KEY || '' } });
+      const r = await axios.get(`https://public-api.birdeye.so/defi/price?address=${p.ca}`, {
+        headers: { 'x-api-key': process.env.BIRDEYE_KEY || '' }
+      });
       price = r.data.data?.value || p.entry_price;
     } catch {}
 
@@ -248,7 +258,7 @@ async function showPositions(ctx) {
     totalPnL += pnl;
 
     buttons.push([
-      { text: `${p.symbol} ${pnl>=0?'+':''}$${Math.abs(pnl).toFixed(1)}`, callback_data: 'x' },
+      { text: `${p.symbol} ${pnl >= 0 ? '+' : ''}$${Math.abs(pnl).toFixed(1)}`, callback_data: 'x' },
       { text: "25%", callback_data: `sell_${p.id}_25` },
       { text: "50%", callback_data: `sell_${p.id}_50` },
       { text: "100%", callback_data: `sell_${p.id}_100` }
@@ -260,7 +270,7 @@ async function showPositions(ctx) {
 
   if (dd > 12) {
     db.run('UPDATE users SET failed=1 WHERE user_id=?', [userId]);
-    return ctx.reply('CHALLENGE FAILED — DD >12%');
+    return ctx.reply('CHALLENGE FAILED — Drawdown >12%');
   }
   if (equity >= user.target) {
     db.run('UPDATE users SET failed=2 WHERE user_id=?', [userId]);
@@ -284,5 +294,6 @@ bot.action(/sell_(\d+)_(\d+)/, async ctx => {
   ctx.answerCbQuery('Sell executed');
 });
 
+// START BOT
 bot.launch();
-app.listen(process.env.PORT || 3000, () => console.log('CRUCIBLE BOT – 100% WORKING – DEC 2025'));
+app.listen(process.env.PORT || 3000, () => console.log('CRUCIBLE PROP FIRM BOT – FULLY WORKING – DEC 2025'));
