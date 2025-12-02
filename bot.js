@@ -43,42 +43,6 @@ db.serialize(() => {
 
 const esc = str => String(str).replace(/[_*[\]()~>#+-=|{}.!]/g, '\\$&');
 
-// ====================== TOKEN INFO — 100% WORKING (LIKE TROJAN) ======================
-async function getTokenInfo(ca) {
-  let symbol = ca.slice(0, 8).toUpperCase();
-  let price = 0;
-  let mc = "New";
-
-  try {
-    const res = await axios.get(`https://api.dexscreener.com/latest/dex/pairs/solana/${ca}`, { timeout: 8000 });
-    if (res.data.pair) {
-      symbol = res.data.pair.baseToken.symbol;
-      price = parseFloat(res.data.pair.priceUsd) || 0;
-      mc = res.data.pair.fdv ? `$${(res.data.pair.fdv / 1000000).toFixed(2)}M` : "New";
-    }
-  } catch (e) {}
-
-  if (price === 0) {
-    try {
-      const bd = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
-        headers: { 'x-api-key': process.env.BIRDEYE_KEY || '' }
-      });
-      if (bd.data.success && bd.data.data?.value) {
-        price = bd.data.data.value;
-        symbol = bd.data.data.symbol || symbol;
-        mc = "New";
-      }
-    } catch (e) {}
-  }
-
-  if (price === 0) {
-    price = 0.000000001;
-    mc = "Ultra New";
-  }
-
-  return { symbol, price, mc };
-}
-
 // ====================== START & RULES ======================
 bot.start(ctx => {
   ctx.replyWithMarkdownV2(esc(`
@@ -105,7 +69,7 @@ bot.action('rules', ctx => {
   ctx.replyWithMarkdownV2(esc(`*RULES*\n\n• Max drawdown: 12%\n• Target: 130%\n• No martingale\n• No hedging\n• Payout in 24h`));
 });
 
-// ====================== PAYMENT + ADMIN TEST ======================
+// ====================== PAYMENT WEBHOOK ======================
 app.post('/create-funded-wallet', async (req, res) => {
   try {
     const { userId, payAmount } = req.body;
@@ -113,12 +77,21 @@ app.post('/create-funded-wallet', async (req, res) => {
     if (!tier) return res.status(400).json({ok: false});
 
     await new Promise(r => db.run(
-      `INSERT OR REPLACE INTO users (user_id, paid, balance, start_balance, target, bounty, failed) VALUES (?, 1, ?, ?, ?, ?, 0)`,
+      `INSERT OR REPLACE INTO users (user_id, paid, balance, start_balance, target, bounty, failed)
+       VALUES (?, 1, ?, ?, ?, ?, 0)`,
       [userId, tier.balance, tier.balance, tier.target, tier.bounty], () => r()
     ));
 
     bot.telegram.sendMessage(ADMIN_ID, `NEW PAID $${payAmount} → $${tier.balance}\nUser: ${userId}`);
-    bot.telegram.sendMessage(userId, esc(`CHALLENGE STARTED\n\nCapital: $${tier.balance}\nTarget: $${tier.target}\nMax DD: 12%\n\nPaste any token address`), {
+    bot.telegram.sendMessage(userId, esc(`
+CHALLENGE STARTED
+
+Capital: $${tier.balance}
+Target: $${tier.target}
+Max DD: 12%
+
+Paste any Solana token address to buy
+    `), {
       parse_mode: 'MarkdownV2',
       reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "positions" }]] }
     });
@@ -130,14 +103,18 @@ app.post('/create-funded-wallet', async (req, res) => {
   }
 });
 
+// ====================== ADMIN TEST (FIXED) ======================
 bot.command('admin_test', async ctx => {
   if (ctx.from.id !== ADMIN_ID) return;
   const pay = Number(ctx.message.text.split(' ')[1]);
-  if (![20, 30, 40, 50].includes(pay)) return ctx.reply('Usage: /admin_test 20 | 30 | 40 | 50');
+  if (![20, 30, 40, 50].includes(pay)) {
+    return ctx.reply('Usage: /admin_test 20 | 30 | 40 | 50');
+  }
   const tier = TIERS[pay];
 
   await new Promise(r => db.run(
-    `INSERT OR REPLACE INTO users (user_id, paid, balance, start_balance, target, bounty, failed) VALUES (?, 1, ?, ?, ?, ?, 0)`,
+    `INSERT OR REPLACE INTO users (user_id, paid, balance, start_balance, target, bounty, failed)
+     VALUES (?, 1, ?, ?, ?, ?, 0)`,
     [ctx.from.id, tier.balance, tier.balance, tier.target, tier.bounty], () => r()
   ));
 
@@ -162,8 +139,7 @@ async function handleBuy(ctx, ca) {
   });
 }
 
-// ====================== BUY BUTTON — FIXED & WORKING ======================
-// ====================== BUY BUTTON — 100% CORRECT COIN NAME & MC ======================
+// ====================== BUY BUTTON — FIXED (CORRECT MC, AGE, NO WRONG DATA) ======================
 bot.action(/buy\|(.+)\|(.+)/, async ctx => {
   try {
     await ctx.answerCbQuery('Sniping…');
@@ -172,32 +148,37 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
     const amount = Number(ctx.match[2]);
     const userId = ctx.from.id;
 
-    const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1', [userId], (_,row) => r(row)));
-    if (!user || amount > user.balance) return ctx.editMessageText('Insufficient balance');
+    const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_, row) => r(row)));
+    if (!user || amount > user.balance) {
+      return ctx.editMessageText('Insufficient balance');
+    }
 
-    // THIS IS THE REAL ENDPOINT EVERY PRO BOT USES (not the broken /pairs/solana/ one)
+    // PRO ENDPOINT — SORTS BY LIQUIDITY FOR CORRECT PAIR
     const url = `https://api.dexscreener.com/latest/dex/tokens/${ca}`;
-
     const { data } = await axios.get(url, { timeout: 9000 });
 
     let pair = null;
     if (data.pairs && data.pairs.length > 0) {
-      // Find the real Raydium or Orca pair (highest liquidity)
-      pair = data.pairs.sort((a,b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+      pair = data.pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
     }
 
-    if (!pair) throw new Error('No pair');
+    if (!pair) {
+      return ctx.editMessageText('No pair found – too new, try in 10s');
+    }
 
-    const symbol   = pair.baseToken.symbol;
-    const price    = parseFloat(pair.priceUsd);
-    const fdv      = pair.fdv ? (pair.fdv / 1000000).toFixed(2) + 'M' : 'New';
-    const ageMins  = Math.floor((Date.now()/1000 - pair.pairCreatedAt) / 60);
+    const symbol = pair.baseToken.symbol;
+    const price = parseFloat(pair.priceUsd);
+    const mc = pair.marketCap ? `$${(pair.marketCap / 1000000).toFixed(2)}M` : 'New';
+    const createdAt = pair.pairCreatedAt; // ms timestamp
+    const ageMins = createdAt ? Math.floor((Date.now() - createdAt) / (1000 * 60)) : 0;
 
     const tokens = amount / price;
 
-    await new Promise(r => db.run('INSERT INTO positions (user_id,ca,symbol,amount_usd,tokens_bought,entry_price,created_at) VALUES(?,?,?,?,?,?,?)',
-      [userId, ca, symbol, amount, tokens, price, Date.now()], r));
-    await new Promise(r => db.run('UPDATE users SET balance=balance-? WHERE user_id=?', [amount, userId], r));
+    await new Promise(r => db.run(
+      'INSERT INTO positions (user_id, ca, symbol, amount_usd, tokens_bought, entry_price, created_at) VALUES (?,?,?,?,?,?,?)',
+      [userId, ca, symbol, amount, tokens, price, Date.now()], r
+    ));
+    await new Promise(r => db.run('UPDATE users SET balance = balance - ? WHERE user_id = ?', [amount, userId], r));
 
     const msg = esc(`
 BUY EXECUTED
@@ -205,12 +186,12 @@ BUY EXECUTED
 ${symbol}
 Size: $${amount}
 Tokens: ${tokens.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
-Entry: $${price.toFixed(12).replace(/0+$/,'')}
-MC/FDV: $${fdv}
+Entry: $${price.toFixed(12).replace(/\.?0+$/, '')}
+MC: ${mc}
 Age: ${ageMins}m
 
 Remaining: $${(user.balance - amount).toFixed(2)}
-    `.trim());
+    `);
 
     await ctx.editMessageText(msg, {
       parse_mode: 'MarkdownV2',
@@ -218,10 +199,11 @@ Remaining: $${(user.balance - amount).toFixed(2)}
     });
 
   } catch (err) {
-    console.log(err.message);
-    try { await ctx.editMessageText('Failed – token too new or rug. Try again in 10s'); } catch {}
+    console.error(err);
+    try { await ctx.editMessageText('Buy failed – try again'); } catch {}
   }
 });
+
 // ====================== CUSTOM AMOUNT ======================
 bot.action(/custom\|(.+)/, async ctx => {
   ctx.session = ctx.session || {};
@@ -248,14 +230,16 @@ bot.on('text', async ctx => {
   }
 });
 
-// ====================== POSITIONS & SELL (unchanged) ======================
+// ====================== POSITIONS — FIXED DD CALC (NO FALSE TRIGGERS) ======================
 async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update?.callback_query?.from?.id;
-  const user = await new Promise(r => db.get('SELECT balance, start_balance, target FROM users WHERE user_id=? AND paid=1', [userId], (_, row) => r(row)));
+  const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_, row) => r(row)));
   if (!user) return ctx.reply('No active challenge');
 
   const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id=?', [userId], (_, rows) => r(rows || [])));
-  if (positions.length === 0) return ctx.reply('No positions', { reply_markup: { inline_keyboard: [[{ text: "Refresh", callback_data: "positions" }]] } });
+  if (positions.length === 0) {
+    return ctx.reply('No positions', { reply_markup: { inline_keyboard: [[{ text: "Refresh", callback_data: "positions" }]] } });
+  }
 
   let totalPnL = 0;
   const buttons = [];
@@ -281,7 +265,7 @@ async function showPositions(ctx) {
   }
 
   const equity = user.balance + totalPnL;
-  const dd = ((user.start_balance - equity) / user.start_balance) * 100;
+  const dd = equity > 0 ? Math.max(0, ((user.start_balance - equity) / user.start_balance) * 100) : 100; // Fixed: max(0, ...) to avoid negatives; check equity > 0
 
   if (dd > 12) {
     await new Promise(r => db.run('UPDATE users SET failed=1 WHERE user_id=?', [userId], r));
@@ -307,6 +291,7 @@ bot.command('positions', showPositions);
 bot.action('positions', ctx => { ctx.answerCbQuery(); showPositions(ctx); });
 bot.action('noop', ctx => ctx.answerCbQuery());
 
+// ====================== SELL ======================
 bot.action(/sell_(\d+)_(\d+)/, async ctx => {
   try {
     await ctx.answerCbQuery('Selling…');
@@ -343,7 +328,7 @@ bot.action(/sell_(\d+)_(\d+)/, async ctx => {
 
 // ====================== START ======================
 bot.launch();
-app.listen(process.env.PORT || 3000, () => console.log('CRUCIBLE BOT — FINAL FIXED & WORKING — DEC 2025'));
+app.listen(process.env.PORT || 3000, () => console.log('CRUCIBLE BOT — FIXED MC/AGE/DD — DEC 2025'));
 
 process.on('SIGINT', () => { db.close(); bot.stop(); process.exit(); });
 process.on('SIGTERM', () => { db.close(); bot.stop(); process.exit(); });
