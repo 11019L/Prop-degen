@@ -166,50 +166,38 @@ async function handleBuy(ctx, ca) {
 // ====================== BUY BUTTON — 100% CORRECT COIN NAME & MC ======================
 bot.action(/buy\|(.+)\|(.+)/, async ctx => {
   try {
-    await ctx.answerCbQuery('Processing…');
+    await ctx.answerCbQuery('Sniping…');
 
-    const ca = ctx.match[1];
+    const ca = ctx.match[1].trim();
     const amount = Number(ctx.match[2]);
     const userId = ctx.from.id;
 
-    const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_, row) => r(row)));
-    if (!user || amount > user.balance) {
-      return ctx.editMessageText('Insufficient balance');
+    const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1', [userId], (_,row) => r(row)));
+    if (!user || amount > user.balance) return ctx.editMessageText('Insufficient balance');
+
+    // THIS IS THE REAL ENDPOINT EVERY PRO BOT USES (not the broken /pairs/solana/ one)
+    const url = `https://api.dexscreener.com/latest/dex/tokens/${ca}`;
+
+    const { data } = await axios.get(url, { timeout: 9000 });
+
+    let pair = null;
+    if (data.pairs && data.pairs.length > 0) {
+      // Find the real Raydium or Orca pair (highest liquidity)
+      pair = data.pairs.sort((a,b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
     }
 
-    // THIS IS YOUR ORIGINAL WORKING METHOD — NEVER TOUCHED, JUST CLEANED
-    let symbol = ca.slice(0, 8).toUpperCase();
-    let price = 0;
-    let mc = "N/A";
+    if (!pair) throw new Error('No pair');
 
-    try {
-      const ds = await axios.get(`https://api.dexscreener.com/latest/dex/pairs/solana/${ca}`, { timeout: 10000 });
-      const pair = ds.data.pair;
-      if (pair) {
-        symbol = pair.baseToken.symbol;
-        price = parseFloat(pair.priceUsd) || 0;
-        mc = pair.fdv ? `$${(pair.fdv / 1000000).toFixed(2)}M` : "N/A";
-      }
-    } catch (e) {}
-
-    // Only fallback to Birdeye for price — NEVER overwrite symbol
-    if (price === 0) {
-      try {
-        const bd = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
-          headers: { 'x-api-key': process.env.BIRDEYE_KEY || '' }
-        });
-        if (bd.data.success) price = bd.data.data.value;
-      } catch {}
-    }
-
-    // NEVER REJECT — this is what made your old code perfect
-    if (price === 0) price = 0.000000001;
+    const symbol   = pair.baseToken.symbol;
+    const price    = parseFloat(pair.priceUsd);
+    const fdv      = pair.fdv ? (pair.fdv / 1000000).toFixed(2) + 'M' : 'New';
+    const ageMins  = Math.floor((Date.now()/1000 - pair.pairCreatedAt) / 60);
 
     const tokens = amount / price;
 
-    await new Promise(r => db.run('INSERT INTO positions (user_id, ca, symbol, amount_usd, tokens_bought, entry_price, created_at) VALUES (?,?,?,?,?,?,?)',
+    await new Promise(r => db.run('INSERT INTO positions (user_id,ca,symbol,amount_usd,tokens_bought,entry_price,created_at) VALUES(?,?,?,?,?,?,?)',
       [userId, ca, symbol, amount, tokens, price, Date.now()], r));
-    await new Promise(r => db.run('UPDATE users SET balance = balance - ? WHERE user_id=?', [amount, userId], r));
+    await new Promise(r => db.run('UPDATE users SET balance=balance-? WHERE user_id=?', [amount, userId], r));
 
     const msg = esc(`
 BUY EXECUTED
@@ -217,11 +205,12 @@ BUY EXECUTED
 ${symbol}
 Size: $${amount}
 Tokens: ${tokens.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
-Entry: $${price.toFixed(12).replace(/\.?0+$/, '')}
-MC: ${mc}
+Entry: $${price.toFixed(12).replace(/0+$/,'')}
+MC/FDV: $${fdv}
+Age: ${ageMins}m
 
 Remaining: $${(user.balance - amount).toFixed(2)}
-    `);
+    `.trim());
 
     await ctx.editMessageText(msg, {
       parse_mode: 'MarkdownV2',
@@ -229,11 +218,10 @@ Remaining: $${(user.balance - amount).toFixed(2)}
     });
 
   } catch (err) {
-    console.error(err);
-    try { await ctx.editMessageText('Buy failed – try again'); } catch {}
+    console.log(err.message);
+    try { await ctx.editMessageText('Failed – token too new or rug. Try again in 10s'); } catch {}
   }
 });
-
 // ====================== CUSTOM AMOUNT ======================
 bot.action(/custom\|(.+)/, async ctx => {
   ctx.session = ctx.session || {};
