@@ -77,22 +77,53 @@ app.post('/create-funded-wallet', async (req, res) => {
   try {
     const { userId, payAmount } = req.body;
     const tier = TIERS[payAmount];
-    if (!tier) return res.status(400).json({ok:false});
-    await new Promise(r => db.run(`INSERT OR REPLACE INTO users VALUES (?,?,1,?,?,?,0)`, [userId, tier.balance, tier.balance, tier.target, tier.bounty], r));
-    bot.telegram.sendMessage(ADMIN_ID, `PAID $${payAmount} → $${tier.balance} | ${userId}`);
-    bot.telegram.sendMessage(userId, esc(`CHALLENGE STARTED\n\n$${tier.balance} capital\nPaste CA`), { reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "positions" }]] }});
-    res.json({ok:true});
-  } catch (e) { console.error(e); res.status(500).json({ok:false}); }
+    if (!tier) return res.status(400).json({ok: false});
+
+    await new Promise(r => db.run(
+      `INSERT OR REPLACE INTO users (user_id, paid, balance, start_balance, target, bounty, failed)
+       VALUES (?, 1, ?, ?, ?, ?, 0)`,
+      [userId, tier.balance, tier.balance, tier.target, tier.bounty], () => r()
+    ));
+
+    bot.telegram.sendMessage(ADMIN_ID, `NEW PAID $${payAmount} → $${tier.balance}\nUser: ${userId}`);
+    bot.telegram.sendMessage(userId, esc(`
+CHALLENGE STARTED
+
+Capital: $${tier.balance}
+Target: $${tier.target}
+Max DD: 12%
+
+Paste any Solana token address to buy
+    `), {
+      parse_mode: 'MarkdownV2',
+      reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "positions" }]] }
+    });
+
+    res.json({ok: true});
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ok: false});
+  }
 });
 
 bot.command('admin_test', async ctx => {
   if (ctx.from.id !== ADMIN_ID) return;
-  const pay = Number(ctx.message.text.split(' ')[1]) || 30;
-  const tier = TIERS[pay] || TIERS[30];
-  await new Promise(r => db.run(`INSERT OR REPLACE INTO users VALUES (?,?,1,?,?,?,0)`, [ctx.from.id, tier.balance, tier.balance, tier.target, tier.bounty], r));
-  ctx.replyWithMarkdownV2(esc(`READY — $${pay} → $${tier.balance}`));
-});
+  const pay = Number(ctx.message.text.split(' ')[1]);
+  if (![20, 30, 40, 50].includes(pay)) {
+    return ctx.reply('Usage: /admin_test 20 | 30 | 40 | 50');
+  }
+  const tier = TIERS[pay];
 
+  await new Promise(r => db.run(
+    `INSERT OR REPLACE INTO users (user_id, paid, balance, start_balance, target, bounty, failed)
+     VALUES (?, 1, ?, ?, ?, ?, 0)`,
+    [ctx.from.id, tier.balance, tier.balance, tier.target, tier.bounty], () => r()
+  ));
+
+  ctx.replyWithMarkdownV2(esc(`ADMIN TEST READY\n$${pay} → $${tier.balance}\nStart pasting CAs!`), {
+    reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "positions" }]] }
+  });
+});
 // BUY FLOW
 async function handleBuy(ctx, ca) {
   const user = await new Promise(r => db.get('SELECT balance FROM users WHERE user_id=? AND paid=1', [ctx.from.id], (_,row) => r(row)));
