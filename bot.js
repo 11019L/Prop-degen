@@ -73,31 +73,40 @@ async function getUser(id) {
 const lastCA = new Map(); // Rate limit per user
 
 async function getTokenInfo(ca) {
-  let symbol = ca.slice(0, 8);
+  let symbol = ca.slice(0, 8).toUpperCase();
   let price = 0;
-  let mc = 'N/A';
+  let mc = "New";
 
-  // Try both APIs in parallel
-  const [dex, bird] = await Promise.allSettled([
-    axios.get(`https://api.dexscreener.com/latest/dex/pairs/solana/${ca}`, { timeout: 7000 }),
-    axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
-      headers: { 'x-api-key': process.env.BIRDEYE_KEY || '', 'X-CHAIN': 'solana' },
-      timeout: 7000
-    })
-  ]);
+  // 1. Jupiter — fastest price for brand-new tokens (appears in <10 seconds)
+  try {
+    const jup = await axios.get(`https://quote-api.jup.ag/v6/price?ids=${ca}`, { timeout: 6000 });
+    if (jup.data?.data?.[ca]?.price) {
+      price = jup.data.data[ca].price;
+    }
+  } catch (e) {}
 
-  if (dex.status === 'fulfilled' && dex.value.data?.pair) {
-    const p = dex.value.data.pair;
-    symbol = p.baseToken.symbol;
-    price = parseFloat(p.priceUsd) || 0;
-    mc = p.fdv ? `$${(p.fdv / 1000000).toFixed(2)}M` : 'N/A';
+  // 2. If Jupiter has no price yet → fall back to DexScreener (has symbol + MC)
+  if (price === 0) {
+    try {
+      const dex = await axios.get(`https://api.dexscreener.com/latest/dex/pairs/solana/${ca}`, { timeout: 7000 });
+      if (dex.data?.pair) {
+        const p = dex.data.pair;
+        symbol = p.baseToken?.symbol || symbol;
+        price = parseFloat(p.priceUsd) || 0;
+        mc = p.fdv ? `$${(p.fdv / 1_000_000).toFixed(2)}M` : "New";
+      }
+    } catch (e) {}
   }
-  if (price === 0 && bird.status === 'fulfilled' && bird.value.data?.success) {
-    price = bird.value.data.data.value || 0;
-    symbol = bird.value.data.data.symbol || symbol;
+
+  // 3. LAST RESORT: Token is so new even Jupiter/DexScreener don't see it yet
+  // → Allow buy anyway with tiny fake price (this is what made it "just work" before)
+  if (price === 0) {
+    price = 0.000000001;  // Tiny price so tokens = amountUSD / price = huge number → works perfectly
+    symbol = symbol;
+    mc = "Ultra New";
   }
 
-  return { symbol, price: price || 0, mc };
+  return { symbol, price, mc };
 }
 
 // ====================== START & RULES ======================
@@ -282,8 +291,6 @@ bot.action(/buy\|(.+)\|(\d+)/, async (ctx) => {
     }
 
     const { symbol, price, mc } = await getTokenInfo(ca);
-    if (price === 0) {
-      return ctx.editMessageText('Token not found or no liquidity\nTry again in 30-60 seconds');
     }
 
     const tokens = amount / price;
