@@ -199,22 +199,18 @@ async function showPositions(ctx) {
   if (!user) return ctx.reply('No active challenge');
 
   const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id=?', [userId], (_, rows) => r(rows || [])));
-  if (positions.length === 0) {
-    const text = 'No open positions';
-    return ctx.update?.callback_query ? ctx.editMessageText(text, { reply_markup: { inline_keyboard: [[{ text: "Refresh", callback_data: "positions" }]] } }) : ctx.reply(text, { reply_markup: { inline_keyboard: [[{ text: "Refresh", callback_data: "positions" }]] } });
-  }
 
   let totalPnL = 0;
   const buttons = [];
 
-  // FAST PARALLEL FETCH — correct PnL on first click
-  const tokenDataPromises = positions.map(p => getTokenData(p.ca));
-  const tokenResults = await Promise.all(tokenDataPromises);
+  // SUPER FAST PARALLEL FETCH — PnL correct on FIRST refresh
+  const pricePromises = positions.map(p => getTokenData(p.ca));
+  const results = await Promise.all(pricePromises);
 
   for (let i = 0; i < positions.length; i++) {
     const p = positions[i];
-    const token = tokenResults[i] || { price: p.entry_price };
-    const pnl = (token.price - p.entry_price) * p.tokens_bought;
+    const live = results[i] || { price: p.entry_price };
+    const pnl = (live.price - p.entry_price) * p.tokens_bought;
     totalPnL += pnl;
 
     buttons.push([
@@ -243,23 +239,30 @@ LIVE POSITIONS (${positions.length})
 Equity: $${equity.toFixed(2)}
 PnL: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
 Drawdown: ${dd.toFixed(2)}%
-  `);
+  `.trim());
 
   const keyboard = { inline_keyboard: [...buttons, [{ text: "Refresh", callback_data: "positions" }]] };
 
-  // EDIT SAME MESSAGE ON REFRESH — NO SPAM
-  if (ctx.update?.callback_query) {
-    await ctx.editMessageText(text, { parse_mode: 'MarkdownV2', reply_markup: keyboard });
-  } else {
+  // THIS IS THE KEY — ALWAYS EDIT THE SAME MESSAGE
+  try {
+    await ctx.editMessageText(text, {
+      parse_mode: 'MarkdownV2',
+      reply_markup: keyboard
+    });
+  } catch (err) {
+    // If message is too old or same text, Telegram throws — just send new one once
     await ctx.replyWithMarkdownV2(text, { reply_markup: keyboard });
   }
 }
 
-bot.action('positions', async ctx => {
-  await ctx.answerCbQuery();
-  await showPositions(ctx);
+bot.action('positions', async (ctx) => {
+  try {
+    await ctx.answerCbQuery();                // removes loading spinner
+    await showPositions(ctx);                 // this now edits the message
+  } catch (err) {
+    console.error(err);
+  }
 });
-
 // SELL
 bot.action(/sell_(\d+)_(\d+)/, async ctx => {
   await ctx.answerCbQuery('Selling…');
