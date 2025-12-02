@@ -180,10 +180,6 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
       } catch {}
     }
 
-    if (price === 0) {
-      return ctx.editMessageText('Token not found – try again in 30s');
-    }
-
     const tokens = amount / price;
 
     await new Promise(r => db.run(
