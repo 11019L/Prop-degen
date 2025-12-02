@@ -77,15 +77,17 @@ async function getTokenInfo(ca) {
   let price = 0;
   let mc = "New";
 
-  // 1. Jupiter — fastest price for brand-new tokens (appears in <10 seconds)
+  // 1. Jupiter — fastest for brand new tokens
   try {
     const jup = await axios.get(`https://quote-api.jup.ag/v6/price?ids=${ca}`, { timeout: 6000 });
     if (jup.data?.data?.[ca]?.price) {
       price = jup.data.data[ca].price;
     }
-  } catch (e) {}
+  } catch (e) {
+    // ignore silently
+  }
 
-  // 2. If Jupiter has no price yet → fall back to DexScreener (has symbol + MC)
+  // 2. DexScreener fallback
   if (price === 0) {
     try {
       const dex = await axios.get(`https://api.dexscreener.com/latest/dex/pairs/solana/${ca}`, { timeout: 7000 });
@@ -95,14 +97,14 @@ async function getTokenInfo(ca) {
         price = parseFloat(p.priceUsd) || 0;
         mc = p.fdv ? `$${(p.fdv / 1_000_000).toFixed(2)}M` : "New";
       }
-    } catch (e) {}
+    } catch (e) {
+      // ignore silently
+    }
   }
 
-  // 3. LAST RESORT: Token is so new even Jupiter/DexScreener don't see it yet
-  // → Allow buy anyway with tiny fake price (this is what made it "just work" before)
+  // 3. Ultra-new token — still allow buy
   if (price === 0) {
-    price = 0.000000001;  // Tiny price so tokens = amountUSD / price = huge number → works perfectly
-    symbol = symbol;
+    price = 0.000000001;
     mc = "Ultra New";
   }
 
