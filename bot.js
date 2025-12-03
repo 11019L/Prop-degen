@@ -217,76 +217,70 @@ async function showPositions(ctx) {
 
   const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])));
 
-  let totalUnrealizedPnL = 0;
-  const positionButtons = [];
+  let totalPnL = 0;
+  const buttons = [];
 
-  const livePrices = await Promise.all(positions.map(p => getTokenData(p.ca)));
+  const live = await Promise.all(positions.map(p => getTokenData(p.ca)));
 
   for (let i = 0; i < positions.length; i++) {
-    const pos = positions[i];
-    const live = livePrices[i] || { price: pos.entry_price };
-    const pnlPercent = ((live.price - pos.entry_price) / pos.entry_price) * 100;
-    const pnlUSD = (live.price - pos.entry_price) * pos.tokens_bought;
-    totalUnrealizedPnL += pnlUSD;
+    const p = positions[i];
+    const cur = live[i] || { price: p.entry_price };
+    const pnl = (cur.price - p.entry_price) * p.tokens_bought;
+    const pct = p.entry_price > 0 ? ((cur.price - p.entry_price) / p.entry_price) * 100 : 0;
+    totalPnL += pnl;
 
-    const pnlText = pnlUSD >= 0 ? `+$${pnlUSD.toFixed(2)} (+${pnlPercent.toFixed(1)}%)` : `$${pnlUSD.toFixed(2)} (${pnlPercent.toFixed(1)}%)`;
-
-    positionButtons.push([
-      { text: `${pos.symbol} ${pnlText}`, callback_data: 'noop' },
-      { text: '25%', callback_data: `sell_${pos.id}_25` },
-      { text: '50%', callback_data: `sell_${pos.id}_50` },
-      { text: '100%', callback_data: `sell_${pos.id}_100` }
+    buttons.push([
+      { text: `${p.symbol} ${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% (${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)})`, callback_data: 'noop' },
+      { text: '25%', callback_data: `sell_${p.id}_25` },
+      { text: '50%', callback_data: `sell_${p.id}_50` },
+      { text: '100%', callback_data: `sell_${p.id}_100` }
     ]);
   }
 
-  const equity = user.balance + totalUnrealizedPnL;
+  const equity = user.balance + totalPnL;
   const accountPnL = ((equity - user.start_balance) / user.start_balance) * 100;
-  const drawdown = equity < user.start_balance ? ((user.start_balance - equity) / user.start_balance) * 100 : 0;
+  const dd = equity < user.start_balance ? ((user.start_balance - equity) / user.start_balance) * 100 : 0;
 
-  // Check fail/pass
-  if (drawdown > 12) {
-    db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId]);
-    delete positionsMessageId[userId];
-    return ctx.reply('CHALLENGE FAILED — Drawdown >12%');
-  }
-  if (equity >= user.target) {
-    db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId]);
-    delete positionsMessageId[userId];
-    return ctx.reply(`PASSED CHALLENGE! Equity: $${equity.toFixed(2)}`);
-  }
+  if (dd > 12) { db.run('UPDATE users SET failed=1 WHERE user_id=?', [userId]); delete positionsMessageId[userId]; return ctx.reply('CHALLENGE FAILED'); }
+  if (equity >= user.target) { db.run('UPDATE users SET failed=2 WHERE user_id=?', [userId]); delete positionsMessageId[userId]; return ctx.reply('PASSED! DM admin'); }
 
   const text = esc(`
 *LIVE POSITIONS (${positions.length})*
 
 *Equity:* $${equity.toFixed(2)}
-*Unrealized PnL:* ${totalUnrealizedPnL >= 0 ? '+' : ''}$${totalUnrealizedPnL.toFixed(2)}
+*Unrealized PnL:* ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
 *Account PnL:* ${accountPnL >= 0 ? '+' : ''}${accountPnL.toFixed(2)}%
-*Drawdown:* ${drawdown.toFixed(2)}%
+*Drawdown:* ${dd.toFixed(2)}%
   `.trim());
 
   const keyboard = {
     inline_keyboard: [
-      ...positionButtons,
+      ...buttons,
       [{ text: 'Refresh', callback_data: 'refresh_pos' }],
       [{ text: 'Close', callback_data: 'close_pos' }]
     ]
   };
 
-  // THIS IS THE FIX — ONE MESSAGE FOREVER
-  if (positionsMessageId[userId] && ctx.update.callback_query) {
-    await ctx.telegram.editMessageText(chatId, positionsMessageId[userId], null, text, {
-      parse_mode: 'MarkdownV2',
-      reply_markup: keyboard
-    });
+  // ONE MESSAGE FOREVER — this is the real fix
+  if (positionsMessageId[userId] && ctx.update?.callback_query) {
+    await ctx.telegram.editMessageText(chatId, positionsMessageId[userId], null, text, { parse_mode: 'MarkdownV2', reply_markup: keyboard });
   } else {
     const sent = await ctx.replyWithMarkdownV2(text, { reply_markup: keyboard });
     positionsMessageId[userId] = sent.message_id;
   }
 }
 
-// These two lines only
-bot.action('refresh_pos', async (ctx) => { await ctx.answerCbQuery(); await showPositions(ctx); });
-bot.action('close_pos', async (ctx) => { await ctx.answerCbQuery(); await ctx.deleteMessage(); delete positionsMessageId[ctx.from.id]; });
+// First click OR refresh → always works
+bot.action('refresh_pos', async (ctx) => {
+  await ctx.answerCbQuery();
+  await showPositions(ctx);
+});
+
+bot.action('close_pos', async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.deleteMessage();
+  delete positionsMessageId[ctx.from.id];
+});
 // Optional: Close positions panel
 bot.action('close_positions', async ctx => {
   await ctx.answerCbQuery();
