@@ -11,7 +11,7 @@ app.use(express.json());
 const db = new sqlite3.Database('crucible.db');
 const ADMIN_ID = Number(process.env.ADMIN_ID);
 const CHANNEL_LINK = "https://t.me/+yourprivatechannel";
-
+const positionsMessageIds = new Map(); // userId → message_id
 const TIERS = {
   20: { balance: 200, target: 460, bounty: 140 },
   30: { balance: 300, target: 690, bounty: 210 },
@@ -150,7 +150,10 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
     const userId = ctx.from.id;
 
     const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_,row) => r(row)));
-    if (!user || amount > user.balance) return ctx.editMessageText('No funds');
+    if (!user || amount > user.balance) {
+      await ctx.editMessageText('❌ Insufficient balance or no active challenge');
+      return;
+    }
 
     const token = await getTokenData(ca) || { symbol: ca.slice(0,8), price: 0.000000001, mc: "New", age: "New" };
     const tokens = amount / token.price;
@@ -158,12 +161,12 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
     await new Promise(r => {
       db.run('BEGIN');
       db.run('INSERT INTO positions (user_id,ca,symbol,amount_usd,tokens_bought,entry_price,created_at) VALUES(?,?,?,?,?,?,?)',
-        [userId, ca, token.symbol, amount, tokens, token.price, Date.now()], () => {});
-      db.run('UPDATE users SET balance = balance - ? WHERE user_id = ?', [amount, userId], () => {});
+        [userId, ca, token.symbol, amount, tokens, token.price, Date.now()]);
+      db.run('UPDATE users SET balance = balance - ? WHERE user_id = ?', [amount, userId]);
       db.run('COMMIT', r);
     });
 
-      const msg = esc(`
+    const msg = esc(`
 BUY EXECUTED
 
 ${token.symbol}
@@ -173,23 +176,24 @@ Entry: $${token.price.toFixed(12).replace(/\.?0+$/, '')}
 MC: ${token.mc}
 Age: ${token.age}
 
-Remaining: $${(user.balance - amount).toFixed(2)}
-      `.trim());
+Remaining balance: $${(user.balance - amount).toFixed(2)}
+    `.trim());
 
-      // PERMANENT BUY MESSAGE — NEVER DISAPPEARS
-      await ctx.replyWithMarkdownV2(msg, {
-        disable_web_page_preview: true,
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "Positions", callback_data: "positions" }]
-          ]
-        }
-      });
-    } catch (err) {
-      console.error("Buy error:", err);
-      try { await ctx.editMessageText("Buy failed — try again"); } catch {}
-    }
-  });
+    // This message stays forever — we DON'T edit it later
+    await ctx.replyWithMarkdownV2(msg, {
+      disable_web_page_preview: true,
+      reply_markup: {
+        inline_keyboard: [[{ text: "Positions ➜", callback_data: "positions" }]]
+      }
+    });
+
+    // Remove the "How much to buy?" message so it doesn't stay
+    await ctx.deleteMessage();
+  } catch (err) {
+    console.error("Buy error:", err);
+    try { await ctx.editMessageText("❌ Buy failed — try again"); } catch {}
+  }
+});
 
 // CUSTOM + TEXT
 bot.action(/custom\|(.+)/, ctx => { ctx.session = {}; ctx.session.ca = ctx.match[1]; ctx.reply('Send amount in $'); ctx.answerCbQuery(); });
@@ -207,24 +211,26 @@ bot.on('text', async ctx => {
 async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update?.callback_query?.from?.id;
   const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_,row) => r(row)));
-  if (!user) return ctx.reply('No active challenge');
+  if (!user) return ctx.reply('❌ No active challenge');
 
-  const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id=?', [userId], (_,rows) => r(rows || [])));
+  const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id=? ORDER BY id', [userId], (_,rows) => r(rows || [])));
 
   let totalPnL = 0;
   const buttons = [];
 
-  // Parallel fast fetch
   const results = await Promise.all(positions.map(p => getTokenData(p.ca)));
-  
+
   for (let i = 0; i < positions.length; i++) {
     const p = positions[i];
     const live = results[i] || { price: p.entry_price };
-    const pnl = (live.price - p.entry_price) / p.entry_price * 100;  // ← % change
-    totalPnL += (live.price - p.entry_price) * p.tokens_bought;
+    const pnlPercent = p.entry_price === 0 ? 0 : ((live.price - p.entry_price) / p.entry_price) * 100;
+    const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
 
+    totalPnL += pnlUSD;
+
+    const sign = pnlPercent >= 0 ? '+' : '';
     buttons.push([
-      { text: `${p.symbol} ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`, callback_data: 'noop' },
+      { text: `${p.symbol} ${sign}${pnlPercent.toFixed(2)}% (${pnlUSD >= 0 ? '+' : ''}$${pnlUSD.toFixed(2)})`, callback_data: 'noop' },
       { text: "25%", callback_data: `sell_${p.id}_25` },
       { text: "50%", callback_data: `sell_${p.id}_50` },
       { text: "100%", callback_data: `sell_${p.id}_100` }
@@ -237,35 +243,65 @@ async function showPositions(ctx) {
 
   if (dd > 12) {
     db.run('UPDATE users SET failed=1 WHERE user_id=?', [userId]);
-    return ctx.reply('CHALLENGE FAILED — Drawdown >12%');
+    positionsMessageIds.delete(userId);
+    return ctx.reply('💀 CHALLENGE FAILED — Drawdown >12%');
   }
   if (equity >= user.target) {
     db.run('UPDATE users SET failed=2 WHERE user_id=?', [userId]);
-    return ctx.reply(`WINNER! Equity $${equity.toFixed(2)} — DM admin`);
+    positionsMessageIds.delete(userId);
+    return ctx.reply(`🎉 WINNER! Equity $${equity.toFixed(2)} ≥ Target $${user.target}\nDM admin for payout`);
   }
 
   const text = esc(`
-LIVE POSITIONS (${positions.length})
+LIVE POSITIONS (${positions.length || '0'})
 
 Equity: $${equity.toFixed(2)}
 Total: ${totalPct >= 0 ? '+' : ''}${totalPct.toFixed(2)}%
 Drawdown: ${dd.toFixed(2)}%
   `.trim());
 
-  const keyboard = { inline_keyboard: [...buttons, [{ text: "Refresh", callback_data: "positions" }]] };
+  const keyboard = {
+    inline_keyboard: [
+      ...buttons,
+      [{ text: "Refresh", callback_data: "positions" }],
+      positions.length > 0 ? [{ text: "Close", callback_data: "close_positions" }] : []
+    ]
+  };
 
-  // ALWAYS edit the same message
+  const messageId = positionsMessageIds.get(userId);
+
   try {
-    await ctx.editMessageText(text, { parse_mode: 'MarkdownV2', reply_markup: keyboard });
+    if (ctx.update?.callback_query && messageId) {
+      // Edit existing message
+      await ctx.telegram.editMessageText(ctx.chat.id, messageId, undefined, text, {
+        parse_mode: 'MarkdownV2',
+        reply_markup: keyboard
+      });
+    } else {
+      // First time or reply — send new
+      const sent = await ctx.replyWithMarkdownV2(text, { reply_markup: keyboard });
+      positionsMessageIds.set(userId, sent.message_id);
+    }
   } catch (e) {
-    await ctx.replyWithMarkdownV2(text, { reply_markup: keyboard });
+    // If edit fails (e.g. message deleted), send new
+    const sent = await ctx.replyWithMarkdownV2(text, { reply_markup: keyboard });
+    positionsMessageIds.set(userId, sent.message_id);
   }
 }
 
-bot.action('positions', async (ctx) => {
+// Refresh button
+bot.action('positions', async ctx => {
   await ctx.answerCbQuery();
   await showPositions(ctx);
 });
+
+// Optional: Close positions panel
+bot.action('close_positions', async ctx => {
+  await ctx.answerCbQuery();
+  await ctx.deleteMessage();
+  positionsMessageIds.delete(ctx.from.id);
+});
+
 // SELL
 bot.action(/sell_(\d+)_(\d+)/, async ctx => {
   await ctx.answerCbQuery('Selling…');
