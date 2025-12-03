@@ -15,7 +15,6 @@ const positionsMessageIds = new Map(); // userId → message_id
 const positionsMessageId = {}; // This stops spam FOREVER — one message per user
 // ──────────────────────────────────────────────────────────────
 // 1. ADD THESE AT THE TOP (after your other consts)
-const positionsMessageId = {};           // Anti-spam
 const userLastActivity = {};             // For 48h inactivity rule
 const DRAWDOWN_MAX = 17;                 // ← Your new 17%
 const MAX_POSITION_PERCENT = 0.25;       // Rule 5: 25% max per trade
