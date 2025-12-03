@@ -97,12 +97,14 @@ Max DD: 12%
 
 Paste any Solana token address to buy
     `.trim()), {
-      parse_mode: 'MarkdownV2',
-      disable_web_page_preview: true,
-      reply_markup: {
-        inline_keyboard: [[{ text: "Positions ➜", callback_data: "positions" }]]
-      }
-    });
+  parse_mode: 'MarkdownV2',
+  disable_web_page_preview: true,
+  reply_markup: {
+    inline_keyboard: [
+      [{ text: "Positions", callback_data: "refresh_pos" }]
+    ]
+  }
+});
 
     res.json({ok: true});
   } catch (e) {
@@ -178,9 +180,13 @@ New cash balance: $${(user.balance - amount).toFixed(2)}
 
     // This message stays forever
     await ctx.replyWithMarkdownV2(msg, {
-      disable_web_page_preview: true,
+  disable_web_page_preview: true,
+  reply_markup: {
+    inline_keyboard: [
       [{ text: "Positions", callback_data: "refresh_pos" }]
-    });
+    ]
+  }
+});
 
     await ctx.deleteMessage(); // removes the "How much to buy?" keyboard
   } catch (err) {
