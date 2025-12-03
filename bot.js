@@ -13,6 +13,16 @@ const ADMIN_ID = Number(process.env.ADMIN_ID);
 const CHANNEL_LINK = "https://t.me/+yourprivatechannel";
 const positionsMessageIds = new Map(); // userId → message_id
 const positionsMessageId = {}; // This stops spam FOREVER — one message per user
+// ──────────────────────────────────────────────────────────────
+// 1. ADD THESE AT THE TOP (after your other consts)
+const positionsMessageId = {};           // Anti-spam
+const userLastActivity = {};             // For 48h inactivity rule
+const DRAWDOWN_MAX = 17;                 // ← Your new 17%
+const MAX_POSITION_PERCENT = 0.25;       // Rule 5: 25% max per trade
+const MAX_TRADES_PER_DAY = 5;
+const INACTIVITY_HOURS = 48;
+const MAX_PUMP_ALLOWED = 300;            // Rule 6: cannot buy >300% pump
+// ──────────────────────────────────────────────────────────────
 const TIERS = {
   20: { balance: 200, target: 460, bounty: 140 },
   30: { balance: 300, target: 690, bounty: 210 },
@@ -146,11 +156,37 @@ async function handleBuy(ctx, ca) {
 
 // BUY BUTTON — FINAL & PERFECT
 bot.action(/buy\|(.+)\|(.+)/, async ctx => {
-  try {
-    await ctx.answerCbQuery('Buying…');
-    const ca = ctx.match[1].trim();
-    const amount = Number(ctx.match[2]);
-    const userId = ctx.from.id;
+  await ctx.answerCbQuery('Checking rules…');
+  const ca = ctx.match[1].trim();
+  const amount = Number(ctx.match[2]);
+  const userId = ctx.from.id;
+
+  const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_,row) => r(row)));
+  if (!user) return ctx.editMessageText('❌ No active challenge');
+
+  // Rule 5: Max 25% position size
+  if (amount > user.start_balance * MAX_POSITION_PERCENT) {
+    return ctx.editMessageText(`❌ Max position size: 25% ($${ (user.start_balance * MAX_POSITION_PERCENT).toFixed(0) })`);
+  }
+
+  // Rule 6: No coin that pumped >300% recently
+  const token = await getTokenData(ca);
+  if (token) {
+    const priceChange = token.priceChange?.h1 || token.priceChange?.m5 || 0;
+    if (priceChange > MAX_PUMP_ALLOWED) {
+      return ctx.editMessageText(`❌ Coin pumped +${priceChange.toFixed(0)}% recently – not allowed`);
+    }
+  }
+
+  // Count trades today
+  const today = new Date().toISOString().slice(0,10);
+  const tradesToday = await new Promise(r => db.get(
+    `SELECT COUNT(*) as c FROM positions WHERE user_id=? AND DATE(created_at/1000,'unixepoch')=?`, 
+    [userId, today], (_,row) => r(row.c)));
+
+  if (tradesToday >= MAX_TRADES_PER_DAY) {
+    return ctx.editMessageText(`❌ Max ${MAX_TRADES_PER_DAY} trades per day`);
+  }
 
     const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_,row) => r(row)));
     if (!user || amount > user.balance) return ctx.editMessageText('❌ Not enough balance');
@@ -208,60 +244,78 @@ bot.on('text', async ctx => {
 });
 
 // POSITIONS — PnL MOVES, DD FIXED
+// ──────────────────────────────────────────────────────────────
+// 2. REPLACE YOUR ENTIRE showPositions() FUNCTION WITH THIS ONE
 async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update.callback_query.from.id;
   const chatId = ctx.chat?.id || ctx.update.callback_query.message.chat.id;
 
-  const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1 AND failed = 0', [userId], (_, row) => r(row)));
-  if (!user) return ctx.reply('No active challenge');
+  const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row)));
+  if (!user) return ctx.reply('❌ No active challenge');
 
-  const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])));
+  // Update last activity
+  userLastActivity[userId] = Date.now();
+
+  const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ? ORDER BY created_at DESC', [userId], (_, rows) => r(rows || [])));
 
   let totalPnL = 0;
   const buttons = [];
 
-  const live = await Promise.all(positions.map(p => getTokenData(p.ca)));
+  const liveData = await Promise.all(positions.map(p => getTokenData(p.ca)));
 
   for (let i = 0; i < positions.length; i++) {
     const p = positions[i];
-    const cur = live[i] || { price: p.entry_price };
-    const pnl = (cur.price - p.entry_price) * p.tokens_bought;
-    const pct = p.entry_price > 0 ? ((cur.price - p.entry_price) / p.entry_price) * 100 : 0;
-    totalPnL += pnl;
+    const live = liveData[i] || { price: p.entry_price };
+    const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
+    const pnlPct = p.entry_price > 0 ? ((live.price - p.entry_price) / p.entry_price) * 100 : 0;
+    totalPnL += pnlUSD;
 
-    buttons.push([
-      { text: `${p.symbol} ${pct >= 0 ? '+' : ''}${pct.toFixed(1)}% (${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)})`, callback_data: 'noop' },
-      { text: '25%', callback_data: `sell_${p.id}_25` },
-      { text: '50%', callback_data: `sell_${p.id}_50` },
-      { text: '100%', callback_data: `sell_${p.id}_100` }
-    ]);
+    const line = `${p.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% (${pnlUSD >= 0 ? '+' : ''}$${pnlUSD.toFixed(2)})`;
+    const row = [{ text: line, callback_data: 'noop' }];
+
+    if (user.failed === 0) {
+      row.push({ text: '25%', callback_data: `sell_${p.id}_25` });
+      row.push({ text: '50%', callback_data: `sell_${p.id}_50` });
+      row.push({ text: '100%', callback_data: `sell_${p.id}_100` });
+    }
+    buttons.push(row);
   }
 
   const equity = user.balance + totalPnL;
   const accountPnL = ((equity - user.start_balance) / user.start_balance) * 100;
-  const dd = equity < user.start_balance ? ((user.start_balance - equity) / user.start_balance) * 100 : 0;
+  const drawdown = equity < user.start_balance ? ((user.start_balance - equity) / user.start_balance) * 100 : 0;
 
-  if (dd > 12) { db.run('UPDATE users SET failed=1 WHERE user_id=?', [userId]); delete positionsMessageId[userId]; return ctx.reply('CHALLENGE FAILED'); }
-  if (equity >= user.target) { db.run('UPDATE users SET failed=2 WHERE user_id=?', [userId]); delete positionsMessageId[userId]; return ctx.reply('PASSED! DM admin'); }
+  // ───── ONLY FAIL IF REALLY BELOW 17% FLOOR (no false triggers) ─────
+  const floor = user.start_balance * (1 - DRAWDOWN_MAX / 100);
+  if (user.failed === 0 && equity < floor) {
+    db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId]);
+    return showPositions(ctx); // recurse to show failed banner
+  }
+
+  if (user.failed === 0 && equity >= user.target) {
+    db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId]);
+  }
+
+  const status = user.failed === 1 ? '❌ *CHALLENGE FAILED*\n\n' :
+                 user.failed === 2 ? '🎉 *CHALLENGE PASSED!*\n\n' : '';
 
   const text = esc(`
-*LIVE POSITIONS (${positions.length})*
+${status}*LIVE POSITIONS (${positions.length})*
 
-*Equity:* $${equity.toFixed(2)}
-*Unrealized PnL:* ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
-*Account PnL:* ${accountPnL >= 0 ? '+' : ''}${accountPnL.toFixed(2)}%
-*Drawdown:* ${dd.toFixed(2)}%
+Equity: $${equity.toFixed(2)}
+Unrealized PnL: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
+Account PnL: ${accountPnL >= 0 ? '+' : ''}${accountPnL.toFixed(2)}%
+Drawdown: ${drawdown.toFixed(2)}% ${drawdown >= DRAWDOWN_MAX ? '❌' : ''}
   `.trim());
 
   const keyboard = {
     inline_keyboard: [
       ...buttons,
-      [{ text: 'Refresh', callback_data: 'refresh_pos' }],
+      [{ text: 'Refresh ↻', callback_data: 'refresh_pos' }],
       [{ text: 'Close', callback_data: 'close_pos' }]
     ]
   };
 
-  // ONE MESSAGE FOREVER — this is the real fix
   if (positionsMessageId[userId] && ctx.update?.callback_query) {
     await ctx.telegram.editMessageText(chatId, positionsMessageId[userId], null, text, { parse_mode: 'MarkdownV2', reply_markup: keyboard });
   } else {
@@ -270,17 +324,9 @@ async function showPositions(ctx) {
   }
 }
 
-// First click OR refresh → always works
-bot.action('refresh_pos', async (ctx) => {
-  await ctx.answerCbQuery();
-  await showPositions(ctx);
-});
+bot.action('refresh_pos', async (ctx) => { await ctx.answerCbQuery(); await showPositions(ctx); });
+bot.action('close_pos', async (ctx) => { await ctx.answerCbQuery(); await ctx.deleteMessage(); delete positionsMessageId[ctx.from.id]; });
 
-bot.action('close_pos', async (ctx) => {
-  await ctx.answerCbQuery();
-  await ctx.deleteMessage();
-  delete positionsMessageId[ctx.from.id];
-});
 // Optional: Close positions panel
 bot.action('close_positions', async ctx => {
   await ctx.answerCbQuery();
@@ -311,8 +357,28 @@ bot.action(/sell_(\d+)_(\d+)/, async ctx => {
   showPositions(ctx);
 });
 
+// Launch bot and web server
 bot.launch();
-app.listen(process.env.PORT || 3000, () => console.log('CRUCIBLE BOT — FINAL & PERFECT — $50k SHOWS AS $50k'));
+app.listen(process.env.PORT || 3000, () => console.log('CRUCIBLE BOT — LIVE'));
 
-process.on('SIGINT', () => { db.close(); process.exit(); });
-process.on('SIGTERM', () => { db.close(); process.exit(); });
+// Inactivity checker — kills accounts with no activity for 48 hours
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, last] of Object.entries(userLastActivity)) {
+    if (now - last > 48 * 60 * 60 * 1000) {  // 48 hours
+      db.run('UPDATE users SET failed=3 WHERE user_id=? AND failed=0', [userId]);
+      delete userLastActivity[userId];
+      console.log(`User ${userId} failed due to 48h inactivity`);
+    }
+  }
+}, 6 * 60 * 60 * 1000);  // runs every 6 hours
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  db.close();
+  process.exit();
+});
+process.on('SIGTERM', () => {
+  db.close();
+  process.exit();
+});
