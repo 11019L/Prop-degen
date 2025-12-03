@@ -85,8 +85,9 @@ app.post('/create-funded-wallet', async (req, res) => {
       [userId, tier.balance, tier.balance, tier.target, tier.bounty], () => r()
     ));
 
-    bot.telegram.sendMessage(ADMIN_ID, `NEW PAID $${payAmount} → $${tier.balance}\nUser: ${userId}`);
-    bot.telegram.sendMessage(userId, esc(`
+    await bot.telegram.sendMessage(ADMIN_ID, `NEW PAID $${payAmount} → $${tier.balance}\nUser: ${userId}`);
+
+    await bot.telegram.sendMessage(userId, esc(`
 CHALLENGE STARTED
 
 Capital: $${tier.balance}
@@ -94,12 +95,12 @@ Target: $${tier.target}
 Max DD: 12%
 
 Paste any Solana token address to buy
-    `), {
-      parse_mode: 'MarkdownV2',
-      await ctx.editMessageText(msg, {
+    `.trim()), {
       parse_mode: 'MarkdownV2',
       disable_web_page_preview: true,
-      reply_markup: { inline_keyboard: [[{ text: "Positions ➜", callback_data: "positions" }]] }
+      reply_markup: {
+        inline_keyboard: [[{ text: "Positions ➜", callback_data: "positions" }]]
+      }
     });
 
     res.json({ok: true});
