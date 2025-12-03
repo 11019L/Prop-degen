@@ -161,8 +161,8 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
       db.run('UPDATE users SET balance = balance - ? WHERE user_id = ?', [amount, userId], () => {});
       db.run('COMMIT', r);
     });
-`
-const msg = esc(`
+
+      const msg = esc(`
 BUY EXECUTED
 
 ${token.symbol}
@@ -173,23 +173,22 @@ MC: ${token.mc}
 Age: ${token.age}
 
 Remaining: $${(user.balance - amount).toFixed(2)}
-`.trim());
+      `.trim());
 
-// SEND AS A NEW PERMANENT MESSAGE — STAYS FOREVER
-await ctx.replyWithMarkdownV2(msg, {
-  disable_web_page_preview: true,
-  reply_markup: {
-    inline_keyboard: [
-      [{ text: "Positions", callback_data: "positions" }]
-    ]
-  }
-});
-
-  } catch (err) {
-    console.error(err);
-    try { await ctx.editMessageText('Failed – try again'); } catch {}
-  }
-});
+      // PERMANENT BUY MESSAGE — NEVER DISAPPEARS
+      await ctx.replyWithMarkdownV2(msg, {
+        disable_web_page_preview: true,
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Positions", callback_data: "positions" }]
+          ]
+        }
+      });
+    } catch (err) {
+      console.error("Buy error:", err);
+      try { await ctx.editMessageText("Buy failed — try again"); } catch {}
+    }
+  });
 
 // CUSTOM + TEXT
 bot.action(/custom\|(.+)/, ctx => { ctx.session = {}; ctx.session.ca = ctx.match[1]; ctx.reply('Send amount in $'); ctx.answerCbQuery(); });
