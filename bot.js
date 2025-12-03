@@ -161,8 +161,8 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
       db.run('UPDATE users SET balance = balance - ? WHERE user_id = ?', [amount, userId], () => {});
       db.run('COMMIT', r);
     });
-
-    const msg = esc(`
+`
+const msg = esc(`
 BUY EXECUTED
 
 ${token.symbol}
@@ -173,14 +173,14 @@ MC: ${token.mc}
 Age: ${token.age}
 
 Remaining: $${(user.balance - amount).toFixed(2)}
-    `);
+`.trim());
 
-    // SEND AS A NEW PERMANENT MESSAGE — NEVER TOUCHED AGAIN
-  await ctx.replyWithMarkdownV2(msg, {
+// SEND AS A NEW PERMANENT MESSAGE — STAYS FOREVER
+await ctx.replyWithMarkdownV2(msg, {
   disable_web_page_preview: true,
   reply_markup: {
     inline_keyboard: [
-      [{ text: "Positions ➤", callback_data: "positions" }]
+      [{ text: "Positions", callback_data: "positions" }]
     ]
   }
 });
