@@ -248,13 +248,6 @@ Remaining: $${(account.balance - amount).toFixed(2)}
   });
 });
 
-    await ctx.deleteMessage(); // removes the "How much to buy?" keyboard
-  } catch (err) {
-    console.error(err);
-    try { await ctx.editMessageText("❌ Buy failed"); } catch {}
-  }
-});
-
 // CUSTOM + TEXT
 bot.action(/custom\|(.+)/, ctx => { ctx.session = {}; ctx.session.ca = ctx.match[1]; ctx.reply('Send amount in $'); ctx.answerCbQuery(); });
 bot.on('text', async ctx => {
