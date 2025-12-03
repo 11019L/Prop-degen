@@ -187,9 +187,15 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
     return ctx.editMessageText(`❌ Max ${MAX_TRADES_PER_DAY} trades per day`);
   }
 
-    const userRow = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row || null)));
-    if (!userRow || userRow.failed !== 0) return ctx.editMessageText('Challenge is over — no new trades allowed');
-    const user = userRow;  // now safe to assign
+  let user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row || null)));
+
+  if (!user) {
+    return ctx.editMessageText('No active challenge found');
+    }
+
+  if (user.failed !== 0) {
+    return ctx.editMessageText('Challenge is over (failed/passed/inactive). You can still view positions with /positions');
+    }
     if (!user || amount > user.balance) return ctx.editMessageText('❌ Not enough balance');
 
     const token = await getTokenData(ca) || { symbol: ca.slice(0,8), price: 0.000000001, mc: "New", age: "New" };
