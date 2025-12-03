@@ -150,10 +150,7 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
     const userId = ctx.from.id;
 
     const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_,row) => r(row)));
-    if (!user || amount > user.balance) {
-      await ctx.editMessageText('❌ Insufficient balance or no active challenge');
-      return;
-    }
+    if (!user || amount > user.balance) return ctx.editMessageText('❌ Not enough balance');
 
     const token = await getTokenData(ca) || { symbol: ca.slice(0,8), price: 0.000000001, mc: "New", age: "New" };
     const tokens = amount / token.price;
@@ -167,31 +164,27 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
     });
 
     const msg = esc(`
-BUY EXECUTED
+BUY EXECUTED ✅
 
 ${token.symbol}
 Size: $${amount}
 Tokens: ${tokens.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
 Entry: $${token.price.toFixed(12).replace(/\.?0+$/, '')}
-MC: ${token.mc}
-Age: ${token.age}
+MC: ${token.mc} | Age: ${token.age}
 
-Remaining balance: $${(user.balance - amount).toFixed(2)}
+New cash balance: $${(user.balance - amount).toFixed(2)}
     `.trim());
 
-    // This message stays forever — we DON'T edit it later
+    // This message stays forever
     await ctx.replyWithMarkdownV2(msg, {
       disable_web_page_preview: true,
-      reply_markup: {
-        inline_keyboard: [[{ text: "Positions ➜", callback_data: "positions" }]]
-      }
+      reply_markup: { inline_keyboard: [[{ text: "Positions ➜", callback_data: "positions" }]] }
     });
 
-    // Remove the "How much to buy?" message so it doesn't stay
-    await ctx.deleteMessage();
+    await ctx.deleteMessage(); // removes the "How much to buy?" keyboard
   } catch (err) {
-    console.error("Buy error:", err);
-    try { await ctx.editMessageText("❌ Buy failed — try again"); } catch {}
+    console.error(err);
+    try { await ctx.editMessageText("❌ Buy failed"); } catch {}
   }
 });
 
@@ -209,7 +202,9 @@ bot.on('text', async ctx => {
 
 // POSITIONS — PnL MOVES, DD FIXED
 async function showPositions(ctx) {
-  const userId = ctx.from?.id || ctx.update?.callback_query?.from?.id;
+  const userId = ctx.from?.id || ctx.update.callback_query.from.id;
+  const chatId = ctx.chat?.id || ctx.update.callback_query.message.chat.id;
+
   const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_,row) => r(row)));
   if (!user) return ctx.reply('❌ No active challenge');
 
@@ -218,19 +213,17 @@ async function showPositions(ctx) {
   let totalPnL = 0;
   const buttons = [];
 
-  const results = await Promise.all(positions.map(p => getTokenData(p.ca)));
+  const liveData = await Promise.all(positions.map(p => getTokenData(p.ca)));
 
   for (let i = 0; i < positions.length; i++) {
     const p = positions[i];
-    const live = results[i] || { price: p.entry_price };
-    const pnlPercent = p.entry_price === 0 ? 0 : ((live.price - p.entry_price) / p.entry_price) * 100;
+    const live = liveData[i] || { price: p.entry_price };
+    const pnlPercent = ((live.price - p.entry_price) / p.entry_price) * 100;
     const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
-
     totalPnL += pnlUSD;
 
-    const sign = pnlPercent >= 0 ? '+' : '';
     buttons.push([
-      { text: `${p.symbol} ${sign}${pnlPercent.toFixed(2)}% (${pnlUSD >= 0 ? '+' : ''}$${pnlUSD.toFixed(2)})`, callback_data: 'noop' },
+      { text: `${p.symbol}  ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}% (${pnlUSD >= 0 ? '+' : ''}$${pnlUSD.toFixed(2)})`, callback_data: 'noop' },
       { text: "25%", callback_data: `sell_${p.id}_25` },
       { text: "50%", callback_data: `sell_${p.id}_50` },
       { text: "100%", callback_data: `sell_${p.id}_100` }
@@ -238,62 +231,53 @@ async function showPositions(ctx) {
   }
 
   const equity = user.balance + totalPnL;
-  const totalPct = ((equity - user.start_balance) / user.start_balance) * 100;
+  const accountPnL = ((equity - user.start_balance) / user.start_balance) * 100;
   const dd = equity < user.start_balance ? ((user.start_balance - equity) / user.start_balance) * 100 : 0;
 
   if (dd > 12) {
     db.run('UPDATE users SET failed=1 WHERE user_id=?', [userId]);
     positionsMessageIds.delete(userId);
-    return ctx.reply('💀 CHALLENGE FAILED — Drawdown >12%');
+    return ctx.reply('💀 CHALLENGE FAILED – DD >12%');
   }
   if (equity >= user.target) {
     db.run('UPDATE users SET failed=2 WHERE user_id=?', [userId]);
     positionsMessageIds.delete(userId);
-    return ctx.reply(`🎉 WINNER! Equity $${equity.toFixed(2)} ≥ Target $${user.target}\nDM admin for payout`);
+    return ctx.reply(`🎉 PASSED! Equity $${equity.toFixed(2)} – DM admin`);
   }
 
   const text = esc(`
-LIVE POSITIONS (${positions.length || '0'})
+LIVE POSITIONS (${positions.length})
 
 Equity: $${equity.toFixed(2)}
-Total: ${totalPct >= 0 ? '+' : ''}${totalPct.toFixed(2)}%
+Account PnL: ${accountPnL >= 0 ? '+' : ''}${accountPnL.toFixed(2)}%
 Drawdown: ${dd.toFixed(2)}%
   `.trim());
 
   const keyboard = {
     inline_keyboard: [
       ...buttons,
-      [{ text: "Refresh", callback_data: "positions" }],
-      positions.length > 0 ? [{ text: "Close", callback_data: "close_positions" }] : []
+      [{ text: "Refresh ↻", callback_data: "positions" }],
+      [{ text: "Close", callback_data: "close_pos" }]
     ]
   };
 
-  const messageId = positionsMessageIds.get(userId);
+  const savedId = positionsMessageIds.get(userId);
 
   try {
-    if (ctx.update?.callback_query && messageId) {
-      // Edit existing message
-      await ctx.telegram.editMessageText(ctx.chat.id, messageId, undefined, text, {
-        parse_mode: 'MarkdownV2',
-        reply_markup: keyboard
-      });
+    if (savedId && ctx.update?.callback_query) {
+      await ctx.telegram.editMessageText(chatId, savedId, null, text, { parse_mode: 'MarkdownV2', reply_markup: keyboard });
     } else {
-      // First time or reply — send new
       const sent = await ctx.replyWithMarkdownV2(text, { reply_markup: keyboard });
       positionsMessageIds.set(userId, sent.message_id);
     }
   } catch (e) {
-    // If edit fails (e.g. message deleted), send new
     const sent = await ctx.replyWithMarkdownV2(text, { reply_markup: keyboard });
     positionsMessageIds.set(userId, sent.message_id);
   }
 }
 
-// Refresh button
-bot.action('positions', async ctx => {
-  await ctx.answerCbQuery();
-  await showPositions(ctx);
-});
+bot.action('positions', async ctx => { await ctx.answerCbQuery(); await showPositions(ctx); });
+bot.action('close_pos', async ctx => { await ctx.answerCbQuery(); await ctx.deleteMessage(); positionsMessageIds.delete(ctx.from.id); });
 
 // Optional: Close positions panel
 bot.action('close_positions', async ctx => {
