@@ -96,7 +96,10 @@ Max DD: 12%
 Paste any Solana token address to buy
     `), {
       parse_mode: 'MarkdownV2',
-      reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "positions" }]] }
+      await ctx.editMessageText(msg, {
+      parse_mode: 'MarkdownV2',
+      disable_web_page_preview: true,
+      reply_markup: { inline_keyboard: [[{ text: "Positions ➜", callback_data: "positions" }]] }
     });
 
     res.json({ok: true});
@@ -172,7 +175,15 @@ Age: ${token.age}
 Remaining: $${(user.balance - amount).toFixed(2)}
     `);
 
-    await ctx.editMessageText(msg, { parse_mode: 'MarkdownV2', reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "positions" }]] } });
+    // SEND AS A NEW PERMANENT MESSAGE — NEVER TOUCHED AGAIN
+  await ctx.replyWithMarkdownV2(msg, {
+  disable_web_page_preview: true,
+  reply_markup: {
+    inline_keyboard: [
+      [{ text: "Positions ➤", callback_data: "positions" }]
+    ]
+  }
+});
 
   } catch (err) {
     console.error(err);
@@ -195,26 +206,25 @@ bot.on('text', async ctx => {
 // POSITIONS — PnL MOVES, DD FIXED
 async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update?.callback_query?.from?.id;
-  const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_, row) => r(row)));
+  const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_,row) => r(row)));
   if (!user) return ctx.reply('No active challenge');
 
-  const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id=?', [userId], (_, rows) => r(rows || [])));
+  const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id=?', [userId], (_,rows) => r(rows || [])));
 
   let totalPnL = 0;
   const buttons = [];
 
-  // SUPER FAST PARALLEL FETCH — PnL correct on FIRST refresh
-  const pricePromises = positions.map(p => getTokenData(p.ca));
-  const results = await Promise.all(pricePromises);
-
+  // Parallel fast fetch
+  const results = await Promise.all(positions.map(p => getTokenData(p.ca)));
+  
   for (let i = 0; i < positions.length; i++) {
     const p = positions[i];
     const live = results[i] || { price: p.entry_price };
-    const pnl = (live.price - p.entry_price) * p.tokens_bought;
-    totalPnL += pnl;
+    const pnl = (live.price - p.entry_price) / p.entry_price * 100;  // ← % change
+    totalPnL += (live.price - p.entry_price) * p.tokens_bought;
 
     buttons.push([
-      { text: `${p.symbol} ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`, callback_data: 'noop' },
+      { text: `${p.symbol} ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%`, callback_data: 'noop' },
       { text: "25%", callback_data: `sell_${p.id}_25` },
       { text: "50%", callback_data: `sell_${p.id}_50` },
       { text: "100%", callback_data: `sell_${p.id}_100` }
@@ -222,6 +232,7 @@ async function showPositions(ctx) {
   }
 
   const equity = user.balance + totalPnL;
+  const totalPct = ((equity - user.start_balance) / user.start_balance) * 100;
   const dd = equity < user.start_balance ? ((user.start_balance - equity) / user.start_balance) * 100 : 0;
 
   if (dd > 12) {
@@ -237,31 +248,23 @@ async function showPositions(ctx) {
 LIVE POSITIONS (${positions.length})
 
 Equity: $${equity.toFixed(2)}
-PnL: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
+Total: ${totalPct >= 0 ? '+' : ''}${totalPct.toFixed(2)}%
 Drawdown: ${dd.toFixed(2)}%
   `.trim());
 
   const keyboard = { inline_keyboard: [...buttons, [{ text: "Refresh", callback_data: "positions" }]] };
 
-  // THIS IS THE KEY — ALWAYS EDIT THE SAME MESSAGE
+  // ALWAYS edit the same message
   try {
-    await ctx.editMessageText(text, {
-      parse_mode: 'MarkdownV2',
-      reply_markup: keyboard
-    });
-  } catch (err) {
-    // If message is too old or same text, Telegram throws — just send new one once
+    await ctx.editMessageText(text, { parse_mode: 'MarkdownV2', reply_markup: keyboard });
+  } catch (e) {
     await ctx.replyWithMarkdownV2(text, { reply_markup: keyboard });
   }
 }
 
 bot.action('positions', async (ctx) => {
-  try {
-    await ctx.answerCbQuery();                // removes loading spinner
-    await showPositions(ctx);                 // this now edits the message
-  } catch (err) {
-    console.error(err);
-  }
+  await ctx.answerCbQuery();
+  await showPositions(ctx);
 });
 // SELL
 bot.action(/sell_(\d+)_(\d+)/, async ctx => {
