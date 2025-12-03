@@ -12,6 +12,7 @@ const db = new sqlite3.Database('crucible.db');
 const ADMIN_ID = Number(process.env.ADMIN_ID);
 const CHANNEL_LINK = "https://t.me/+yourprivatechannel";
 const positionsMessageIds = new Map(); // userId → message_id
+const positionsMessageId = {}; // This stops spam FOREVER — one message per user
 const TIERS = {
   20: { balance: 200, target: 460, bounty: 140 },
   30: { balance: 300, target: 690, bounty: 210 },
@@ -178,7 +179,7 @@ New cash balance: $${(user.balance - amount).toFixed(2)}
     // This message stays forever
     await ctx.replyWithMarkdownV2(msg, {
       disable_web_page_preview: true,
-      reply_markup: { inline_keyboard: [[{ text: "Positions ➜", callback_data: "positions" }]] }
+      [{ text: "Positions", callback_data: "refresh_pos" }]
     });
 
     await ctx.deleteMessage(); // removes the "How much to buy?" keyboard
@@ -205,80 +206,81 @@ async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update.callback_query.from.id;
   const chatId = ctx.chat?.id || ctx.update.callback_query.message.chat.id;
 
-  const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_,row) => r(row)));
-  if (!user) return ctx.reply('❌ No active challenge');
+  const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1 AND failed = 0', [userId], (_, row) => r(row)));
+  if (!user) return ctx.reply('No active challenge');
 
-  const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id=? ORDER BY id', [userId], (_,rows) => r(rows || [])));
+  const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])));
 
-  let totalPnL = 0;
-  const buttons = [];
+  let totalUnrealizedPnL = 0;
+  const positionButtons = [];
 
-  const liveData = await Promise.all(positions.map(p => getTokenData(p.ca)));
+  const livePrices = await Promise.all(positions.map(p => getTokenData(p.ca)));
 
   for (let i = 0; i < positions.length; i++) {
-    const p = positions[i];
-    const live = liveData[i] || { price: p.entry_price };
-    const pnlPercent = ((live.price - p.entry_price) / p.entry_price) * 100;
-    const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
-    totalPnL += pnlUSD;
+    const pos = positions[i];
+    const live = livePrices[i] || { price: pos.entry_price };
+    const pnlPercent = ((live.price - pos.entry_price) / pos.entry_price) * 100;
+    const pnlUSD = (live.price - pos.entry_price) * pos.tokens_bought;
+    totalUnrealizedPnL += pnlUSD;
 
-    buttons.push([
-      { text: `${p.symbol}  ${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}% (${pnlUSD >= 0 ? '+' : ''}$${pnlUSD.toFixed(2)})`, callback_data: 'noop' },
-      { text: "25%", callback_data: `sell_${p.id}_25` },
-      { text: "50%", callback_data: `sell_${p.id}_50` },
-      { text: "100%", callback_data: `sell_${p.id}_100` }
+    const pnlText = pnlUSD >= 0 ? `+$${pnlUSD.toFixed(2)} (+${pnlPercent.toFixed(1)}%)` : `$${pnlUSD.toFixed(2)} (${pnlPercent.toFixed(1)}%)`;
+
+    positionButtons.push([
+      { text: `${pos.symbol} ${pnlText}`, callback_data: 'noop' },
+      { text: '25%', callback_data: `sell_${pos.id}_25` },
+      { text: '50%', callback_data: `sell_${pos.id}_50` },
+      { text: '100%', callback_data: `sell_${pos.id}_100` }
     ]);
   }
 
-  const equity = user.balance + totalPnL;
+  const equity = user.balance + totalUnrealizedPnL;
   const accountPnL = ((equity - user.start_balance) / user.start_balance) * 100;
-  const dd = equity < user.start_balance ? ((user.start_balance - equity) / user.start_balance) * 100 : 0;
+  const drawdown = equity < user.start_balance ? ((user.start_balance - equity) / user.start_balance) * 100 : 0;
 
-  if (dd > 12) {
-    db.run('UPDATE users SET failed=1 WHERE user_id=?', [userId]);
-    positionsMessageIds.delete(userId);
-    return ctx.reply('💀 CHALLENGE FAILED – DD >12%');
+  // Check fail/pass
+  if (drawdown > 12) {
+    db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId]);
+    delete positionsMessageId[userId];
+    return ctx.reply('CHALLENGE FAILED — Drawdown >12%');
   }
   if (equity >= user.target) {
-    db.run('UPDATE users SET failed=2 WHERE user_id=?', [userId]);
-    positionsMessageIds.delete(userId);
-    return ctx.reply(`🎉 PASSED! Equity $${equity.toFixed(2)} – DM admin`);
+    db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId]);
+    delete positionsMessageId[userId];
+    return ctx.reply(`PASSED CHALLENGE! Equity: $${equity.toFixed(2)}`);
   }
 
   const text = esc(`
-LIVE POSITIONS (${positions.length})
+*LIVE POSITIONS (${positions.length})*
 
-Equity: $${equity.toFixed(2)}
-Account PnL: ${accountPnL >= 0 ? '+' : ''}${accountPnL.toFixed(2)}%
-Drawdown: ${dd.toFixed(2)}%
+*Equity:* $${equity.toFixed(2)}
+*Unrealized PnL:* ${totalUnrealizedPnL >= 0 ? '+' : ''}$${totalUnrealizedPnL.toFixed(2)}
+*Account PnL:* ${accountPnL >= 0 ? '+' : ''}${accountPnL.toFixed(2)}%
+*Drawdown:* ${drawdown.toFixed(2)}%
   `.trim());
 
   const keyboard = {
     inline_keyboard: [
-      ...buttons,
-      [{ text: "Refresh ↻", callback_data: "positions" }],
-      [{ text: "Close", callback_data: "close_pos" }]
+      ...positionButtons,
+      [{ text: 'Refresh', callback_data: 'refresh_pos' }],
+      [{ text: 'Close', callback_data: 'close_pos' }]
     ]
   };
 
-  const savedId = positionsMessageIds.get(userId);
-
-  try {
-    if (savedId && ctx.update?.callback_query) {
-      await ctx.telegram.editMessageText(chatId, savedId, null, text, { parse_mode: 'MarkdownV2', reply_markup: keyboard });
-    } else {
-      const sent = await ctx.replyWithMarkdownV2(text, { reply_markup: keyboard });
-      positionsMessageIds.set(userId, sent.message_id);
-    }
-  } catch (e) {
+  // THIS IS THE FIX — ONE MESSAGE FOREVER
+  if (positionsMessageId[userId] && ctx.update.callback_query) {
+    await ctx.telegram.editMessageText(chatId, positionsMessageId[userId], null, text, {
+      parse_mode: 'MarkdownV2',
+      reply_markup: keyboard
+    });
+  } else {
     const sent = await ctx.replyWithMarkdownV2(text, { reply_markup: keyboard });
-    positionsMessageIds.set(userId, sent.message_id);
+    positionsMessageId[userId] = sent.message_id;
   }
 }
 
-bot.action('positions', async ctx => { await ctx.answerCbQuery(); await showPositions(ctx); });
-bot.action('close_pos', async ctx => { await ctx.answerCbQuery(); await ctx.deleteMessage(); positionsMessageIds.delete(ctx.from.id); });
-
+// These two lines only
+bot.action('refresh_pos', async (ctx) => { await ctx.answerCbQuery(); await showPositions(ctx); });
+bot.action('close_pos', async (ctx) => { await ctx.answerCbQuery(); await ctx.deleteMessage(); delete positionsMessageId[ctx.from.id]; });
 // Optional: Close positions panel
 bot.action('close_positions', async ctx => {
   await ctx.answerCbQuery();
