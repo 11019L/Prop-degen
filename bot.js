@@ -155,80 +155,97 @@ async function handleBuy(ctx, ca) {
 
 // BUY BUTTON — FINAL & PERFECT
 bot.action(/buy\|(.+)\|(.+)/, async ctx => {
-  await ctx.answerCbQuery('Checking rules…');
+  await ctx.answerCbQuery('Processing buy…');
+
   const ca = ctx.match[1].trim();
   const amount = Number(ctx.match[2]);
   const userId = ctx.from.id;
 
-  const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id=? AND paid=1 AND failed=0', [userId], (_,row) => r(row)));
-  if (!user) return ctx.editMessageText('❌ No active challenge');
+  // Fetch user safely
+  const account = await new Promise(resolve => 
+    db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (err, row) => 
+      resolve(row || null)
+    )
+  );
 
-  // Rule 5: Max 25% position size
-  if (amount > user.start_balance * MAX_POSITION_PERCENT) {
-    return ctx.editMessageText(`❌ Max position size: 25% ($${ (user.start_balance * MAX_POSITION_PERCENT).toFixed(0) })`);
+  if (!account) {
+    return ctx.editMessageText('No active challenge found');
   }
 
-  // Rule 6: No coin that pumped >300% recently
-  const token = await getTokenData(ca);
-  if (token) {
-    const priceChange = token.priceChange?.h1 || token.priceChange?.m5 || 0;
-    if (priceChange > MAX_PUMP_ALLOWED) {
-      return ctx.editMessageText(`❌ Coin pumped +${priceChange.toFixed(0)}% recently – not allowed`);
-    }
+  if (account.failed !== 0) {
+    return ctx.editMessageText('Challenge is over (failed/passed/inactive). You can still view positions.');
   }
 
-  // Count trades today
-  const today = new Date().toISOString().slice(0,10);
-  const tradesToday = await new Promise(r => db.get(
-    `SELECT COUNT(*) as c FROM positions WHERE user_id=? AND DATE(created_at/1000,'unixepoch')=?`, 
-    [userId, today], (_,row) => r(row.c)));
+  // Max 5 trades per day
+  const today = new Date().toISOString().slice(0, 10);
+  const tradesToday = await new Promise(resolve => 
+    db.get(
+      `SELECT COUNT(*) as c FROM positions WHERE user_id = ? AND DATE(created_at / 1000, 'unixepoch') = ?`, 
+      [userId, today], 
+      (err, row) => resolve(row?.c || 0)
+    )
+  );
 
   if (tradesToday >= MAX_TRADES_PER_DAY) {
-    return ctx.editMessageText(`❌ Max ${MAX_TRADES_PER_DAY} trades per day`);
+    return ctx.editMessageText(`Max ${MAX_TRADES_PER_DAY} trades per day reached`);
   }
 
-  let user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row || null)));
+  // Balance + 25% max position size
+  if (amount > account.balance) {
+    return ctx.editMessageText('Not enough balance');
+  }
 
-  if (!user) {
-    return ctx.editMessageText('No active challenge found');
-    }
+  if (amount > account.start_balance * 0.25) {
+    return ctx.editMessageText(`Max position size: 25% ($${(account.start_balance * 0.25).toFixed(0)})`);
+  }
 
-  if (user.failed !== 0) {
-    return ctx.editMessageText('Challenge is over (failed/passed/inactive). You can still view positions with /positions');
-    }
-    if (!user || amount > user.balance) return ctx.editMessageText('❌ Not enough balance');
+  // Get token data
+  const token = await getTokenData(ca);
+  if (!token || !token.price) {
+    return ctx.editMessageText('Failed to fetch token price. Try again.');
+  }
 
-    const token = await getTokenData(ca) || { symbol: ca.slice(0,8), price: 0.000000001, mc: "New", age: "New" };
-    const tokens = amount / token.price;
+  // Optional: block >300% pump
+  const priceChange1h = token.priceChange?.h1 || 0;
+  if (priceChange1h > 300) {
+    return ctx.editMessageText(`Coin pumped +${priceChange1h.toFixed(0)}% in last hour — not allowed`);
+  }
 
-    await new Promise(r => {
-      db.run('BEGIN');
-      db.run('INSERT INTO positions (user_id,ca,symbol,amount_usd,tokens_bought,entry_price,created_at) VALUES(?,?,?,?,?,?,?)',
-        [userId, ca, token.symbol, amount, tokens, token.price, Date.now()]);
-      db.run('UPDATE users SET balance = balance - ? WHERE user_id = ?', [amount, userId]);
-      db.run('COMMIT', r);
-    });
+  const tokensToBuy = amount / token.price;
 
-    const msg = esc(`
-BUY EXECUTED ✅
+  // Execute buy
+  await new Promise(resolve => {
+    db.run('BEGIN');
+    db.run(
+      `INSERT INTO positions (user_id, ca, symbol, amount_usd, tokens_bought, entry_price, created_at) 
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [userId, ca, token.symbol || 'UNKNOWN', amount, tokensToBuy, token.price, Date.now()],
+      () => {}
+    );
+    db.run('UPDATE users SET balance = balance - ? WHERE user_id = ?', [amount, userId]);
+    db.run('COMMIT', resolve);
+  });
 
-${token.symbol}
+  // Success message
+  const msg = esc(`
+BUY EXECUTED
+
+${token.symbol || 'TOKEN'}
 Size: $${amount}
-Tokens: ${tokens.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
+Tokens: ${tokensToBuy.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
 Entry: $${token.price.toFixed(12).replace(/\.?0+$/, '')}
-MC: ${token.mc} | Age: ${token.age}
+MC: ${token.mc || 'N/A'}
 
-New cash balance: $${(user.balance - amount).toFixed(2)}
-    `.trim());
+Remaining: $${(account.balance - amount).toFixed(2)}
+  `.trim());
 
-    // This message stays forever
-    await ctx.replyWithMarkdownV2(msg, {
-  disable_web_page_preview: true,
-  reply_markup: {
-    inline_keyboard: [
-      [{ text: "Positions", callback_data: "refresh_pos" }]
-    ]
-  }
+  await ctx.editMessageText(msg, {
+    parse_mode: 'MarkdownV2',
+    disable_web_page_preview: true,
+    reply_markup: {
+      inline_keyboard: [[{ text: "Positions", callback_data: "refresh_pos" }]]
+    }
+  });
 });
 
     await ctx.deleteMessage(); // removes the "How much to buy?" keyboard
