@@ -3,6 +3,7 @@ const { Telegraf } = require('telegraf');
 const express = require('express');
 const axios = require('axios');
 const sqlite3 = require('sqlite3').verbose();
+const { Connection, PublicKey } = require('@solana/web3.js');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const app = express();
