@@ -7,6 +7,7 @@ const sqlite3 = require('sqlite3').verbose();
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const app = express();
 app.use(express.json());
+ALTER TABLE users ADD COLUMN peak_equity REAL DEFAULT null;
 
 const db = new sqlite3.Database('crucible.db');
 
@@ -14,7 +15,9 @@ const db = new sqlite3.Database('crucible.db');
 db.exec('PRAGMA journal_mode = WAL;'); // Better concurrency
 
 const ADMIN_ID = Number(process.env.ADMIN_ID);
-const CHANNEL_LINK = "https://t.me/+yourprivatechannel";
+const CHANNEL_LINK = "https://t.me/Crucibleprop";
+const priceCache = new Map(); // ca → {price, symbol, mc, ts}
+const CACHE_TTL = 8000; // 8 seconds
 
 // ONLY ONE MESSAGE ID SYSTEM — FIXED
 const positionsMessageId = {};           // userId → message_id (this is the one we use)
@@ -175,7 +178,7 @@ Paste any Solana CA to buy
       parse_mode: 'MarkdownV2',
       reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "refresh_pos" }]] }
     });
-
+userLastActivity[userId] = Date.now();
     res.json({ok: true});
   } catch (e) {
     console.error(e);
@@ -330,41 +333,57 @@ async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update.callback_query.from.id;
   const chatId = ctx.chat?.id || ctx.update.callback_query.message.chat.id;
 
-  const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row)));
-  if (!user) return ctx.reply('No challenge found');
+ // Inside showPositions(), replace the old drawdown code with this:
+const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])));
 
-  userLastActivity[userId] = Date.now();
+let totalPnL = 0;
+for (let i = 0; i < positions.length; i++) {
+  const p = positions[i];
+  const liveData = await Promise.all(positions.map(async (p) => {
+  const cached = priceCache.get(p.ca);
+  if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
 
-  const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])));
+  const fresh = await getTokenData(p.ca);
+  priceCache.set(p.ca, { data: fresh, ts: Date.now() });
+  return fresh;
+}));
+  const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
+  totalPnL += pnlUSD;
+}
 
-  let totalPnL = 0;
-  const buttons = [];
+const equity = user.balance + totalPnL;
 
-  const liveData = await Promise.all(positions.map(p => getTokenData(p.ca)));
+// Track peak equity (add this column once)
+if (!user.peak_equity || equity > user.peak_equity) {
+  await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [equity, userId], r));
+}
 
-  for (let i = 0; i < positions.length; i++) {
-    const p = positions[i];
-    const live = liveData[i] || { price: p.entry_price };
-    const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
-    const pnlPct = p.entry_price > 0 ? ((live.price - p.entry_price) / p.entry_price) * 100 : 0;
-    totalPnL += pnlUSD;
+// Now calculate REAL relative drawdown
+const peak = user.peak_equity || user.start_balance;
+const drawdown = equity < peak ? ((peak - equity) / peak) * 100 : 0;
+const floor = peak * (1 - DRAWDOWN_MAX / 100);
+if (user.failed === 0 && equity >= user.target) {
+  await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
 
-    const row = [{ text: `${p.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% (${pnlUSD >= 0 ? '+' : ''}$${pnlUSD.toFixed(2)})`, callback_data: 'noop' }];
-    if (user.failed === 0) {
-      row.push({ text: '25%', callback_data: `sell_${p.id}_25` });
-      row.push({ text: '50%', callback_data: `sell_${p.id}_50` });
-      row.push({ text: '100%', callback_data: `sell_${p.id}_100` });
+  await ctx.replyWithPhoto(
+    { source: Buffer.from(await generatePassImage(userId, equity)) }, // you can skip image for now
+    { 
+      caption: esc(`
+CONGRATULATIONS! You passed the $${user.start_balance} challenge
+
+Final equity: $${equity.toFixed(2)}
+Profit: +$${(equity - user.start_balance).toFixed(2)}
+
+Bounty $${user.bounty} will be sent within 1–4 hours
+      `.trim()),
+      parse_mode: 'MarkdownV2'
     }
-    buttons.push(row);
-  }
-
-  const equity = user.balance + totalPnL;
-  const drawdown = equity < user.start_balance ? ((user.start_balance - equity) / user.start_balance) * 100 : 0;
-  const floor = user.start_balance * (1 - DRAWDOWN_MAX / 100);
-
-  if (user.failed === 0 && equity < floor) {
-    await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
-  }
+  );
+}
+// Fail only if below peak-based floor
+if (user.failed === 0 && equity < floor) {
+  await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
+}
   if (user.failed === 0 && equity >= user.target) {
     await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
   }
@@ -402,21 +421,48 @@ bot.action('close_pos', async ctx => { await ctx.answerCbQuery(); await ctx.dele
 // SELL
 bot.action(/sell_(\d+)_(\d+)/, async ctx => {
   await ctx.answerCbQuery('Selling…');
+
   const posId = ctx.match[1];
-  const percent = Number(ctx.match[2]);
+  const percent = Number(ctx.match[2]); // 25, 50 or 100
   const userId = ctx.from.id;
 
-  const pos = await new Promise(r => db.get('SELECT * FROM positions WHERE id=? AND user_id=?', [posId, userId], (_, row) => r(row)));
-  if (!pos) return;
+  const pos = await new Promise(r => db.get('SELECT * FROM positions WHERE id = ? AND user_id = ?', [posId, userId], (_, row) => r(row)));
+  if (!pos || percent <= 0 || percent > 100) return;
 
   const token = await getTokenData(pos.ca) || { price: pos.entry_price };
-  const pnl = (token.price - pos.entry_price) * pos.tokens_bought * (percent / 100);
-  const sellUSD = pos.amount_usd * (percent / 100);
+  const currentPrice = token.price;
 
-  await new Promise(r => db.run('UPDATE users SET balance = balance + ? WHERE user_id=?', [sellUSD + pnl, userId], r));
-  if (percent === 100) await new Promise(r => db.run('DELETE FROM positions WHERE id=?', [posId], r));
+  // How much we are selling now
+  const tokensToSell = pos.tokens_bought * (percent / 100);
+  const usdFromSell = tokensToSell * currentPrice;
+  const pnlFromThisSell = (currentPrice - pos.entry_price) * tokensToSell;
 
-  await ctx.replyWithMarkdownV2(esc(`SELL ${percent}% ${pos.symbol}\nPnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`));
+  // Credit user
+  await new Promise(r => db.run(
+    'UPDATE users SET balance = balance + ? WHERE user_id = ?',
+    [usdFromSell + pnlFromThisSell, userId], r
+  ));
+  userLastActivity[userId] = Date.now();
+  if (percent === 100) {
+    // Full close → delete row
+    await new Promise(r => db.run('DELETE FROM positions WHERE id = ?', [posId], r));
+  } else {
+    // Partial close → reduce the position size in DB
+    const remainingPercent = (100 - percent) / 100;
+    await new Promise(r => db.run(`
+      UPDATE positions 
+      SET tokens_bought = tokens_bought * ?, 
+          amount_usd = amount_usd * ?
+      WHERE id = ?`, [remainingPercent, remainingPercent, posId], r));
+  }
+
+  await ctx.replyWithMarkdownV2(esc(`
+*SOLD ${percent}%* ${pos.symbol}
+
+Proceeds: $${usdFromSell.toFixed(2)}
+PnL this sell: ${pnlFromThisSell >= 0 ? '+' : ''}$${pnlFromThisSell.toFixed(2)}
+`.trim()));
+
   showPositions(ctx);
 });
 
