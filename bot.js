@@ -47,7 +47,7 @@ function formatMC(marketCap) {
 async function getTokenData(ca) {
   try {
     // 1. Moralis Token Price API (correct endpoint — no 404s for SPL tokens)
-    const priceRes = await axios.get(`https://solana-gateway.moralis.io/token/mainnet/price/${ca}`, {
+    const priceRes = await axios.get(`https://solana-gateway.moralis.io/token/:network/:address/price/${ca}`, {
       headers: { 
         'accept': 'application/json', 
         'X-API-Key': process.env.MORALIS_API_KEY // Your key; empty works for low volume
@@ -58,7 +58,7 @@ async function getTokenData(ca) {
 
     if (priceData && priceData.usdPrice > 0) {
       // 2. Moralis Token Metadata for symbol/supply
-      const metaRes = await axios.get(`https://solana-gateway.moralis.io/token/mainnet/metadata/${ca}`, {
+      const metaRes = await axios.get(`https://solana-gateway.moralis.io/token/:network/:address/metadata/${ca}`, {
         headers: { 
           'accept': 'application/json', 
           'X-API-Key': process.env.MORALIS_API_KEY 
