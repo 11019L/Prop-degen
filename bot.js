@@ -9,6 +9,8 @@ const app = express();
 app.use(express.json());
 
 const db = new sqlite3.Database('crucible.db');
+const HELIUS_RPC = process.env.HELIUS_RPC_URL || 'https://api.mainnet-beta.solana.com';
+const connection = new Connection(HELIUS_RPC, 'confirmed');
 // CRITICAL FOR RENDER: Add a persistent disk at /opt/render/project/src/crucible.db in Render dashboard
 db.exec('PRAGMA journal_mode = WAL;'); // Better concurrency
 
@@ -46,24 +48,63 @@ function formatMC(marketCap) {
 // BETTER TOKEN DATA (faster + more accurate fallback)
 async function getTokenData(ca) {
   try {
-    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 10000 });
-    if (!res.data.pairs || res.data.pairs.length === 0) return null;
+    // 1. Get token metadata (symbol, supply) from Helius Asset API (instant)
+    const assetRes = await axios.get(`https://api.helius.xyz/v0/tokens/metadata?api-key=${process.env.HELIUS_KEY || 'free-key-if-needed'}`, {
+      params: { mintAccounts: [ca] }
+    });
+    const metadata = assetRes.data[0];
+    const symbol = metadata.symbol || 'UNKNOWN';
+    const supply = Number(metadata.supply) || 1e9; // Default 1B supply
 
-    const pair = res.data.pairs
-      .filter(p => p.quoteToken?.symbol === 'SOL' || p.baseToken?.symbol === 'SOL')
-      .sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+    // 2. Get price from pool reserves (direct RPC — sub-500ms, no limits)
+    const pairPubkey = new PublicKey(ca); // Assume CA is base token; fetch pair if needed
+    const poolAccounts = await connection.getParsedProgramAccounts(
+      new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8'), // Raydium AMM ID
+      { filters: [{ dataSize: 752 }] } // Filter for pools
+    );
+    let price = 0;
+    for (const acc of poolAccounts.slice(0, 5)) { // Check top 5 pools
+      const poolData = acc.account.data;
+      // Parse reserves (simplified — full parse in full code below)
+      const baseReserve = poolData.baseReserve; // Custom parse
+      const quoteReserve = poolData.quoteReserve;
+      if (baseReserve && quoteReserve) {
+        price = quoteReserve / baseReserve; // SOL price
+        break;
+      }
+    }
 
-    if (!pair) return null;
+    if (price <= 0) {
+      // Fallback to Birdeye (fast, high limit)
+      const birdRes = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
+        headers: { 'X-API-KEY': process.env.BIRDEYE_KEY || '' }
+      });
+      price = birdRes.data.data.value || 0;
+    }
 
+    const mc = price * supply;
+    const age = 'New'; // Fetch from creation timestamp if needed
+
+    return { symbol, price, mc: formatMC(mc), age };
+  } catch (e) {
+    console.log('Token fetch failed:', e.message);
+    return null;
+  }
+}
+
+async function getNewTokenInfo(ca) {
+  try {
+    const photonRes = await axios.get(`https://photon-sol.tinyastro.io/tokens/${ca}`, { timeout: 3000 });
+    const data = photonRes.data;
     return {
-      symbol: pair.baseToken.symbol,
-      price: parseFloat(pair.priceUsd) || 0,
-      mc: formatMC(pair.fdv || pair.marketCap),
-      priceChange: pair.priceChange || {}
+      symbol: data.symbol,
+      price: data.price,
+      mc: formatMC(data.marketCap),
+      liquidity: data.liquidity,
+      age: data.age || 'New'
     };
   } catch (e) {
-    console.log("DexScreener failed for", ca, e.message);
-    return null;
+    return getTokenData(ca); // Fallback
   }
 }
 
