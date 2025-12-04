@@ -7,7 +7,6 @@ const sqlite3 = require('sqlite3').verbose();
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const app = express();
 app.use(express.json());
-ALTER TABLE users ADD COLUMN peak_equity REAL DEFAULT null;
 
 const db = new sqlite3.Database('crucible.db');
 
