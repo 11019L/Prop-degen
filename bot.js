@@ -45,74 +45,78 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
+  // === 1. TRY MORALIS (CORRECT ENDPOINT) ===
   try {
-    // 1. Moralis Token Price API (correct endpoint — no 404s for SPL tokens)
-    const priceRes = await axios.get(`https://solana-gateway.moralis.io/token/:network/:address/price/${ca}`, {
-      headers: { 
-        'accept': 'application/json', 
-        'X-API-Key': process.env.MORALIS_API_KEY // Your key; empty works for low volume
+    const priceRes = await axios.get(`https://solana-gateway.moralis.io/token/mainnet/${ca}/price`, {
+      headers: {
+        'accept': 'application/json',
+        'X-API-Key': process.env.MORALIS_API_KEY || '' // Optional now optional for low volume
       },
-      timeout: 5000
+      timeout: 6000
     });
+
     const priceData = priceRes.data;
+    if (priceData?.usdPrice > 0) {
+      // Try metadata too (optional)
+      let symbol = ca.slice(0, 8) + '...';
+      try {
+        const metaRes = await axios.get(`https://solana-gateway.moralis.io/token/mainnet/${ca}/metadata`, {
+          headers: { 'X-API-Key': process.env.MORALIS_API_KEY || '' },
+          timeout: 4000
+        });
+        symbol = metaRes.data.symbol || symbol;
+      } catch {}
 
-    if (priceData && priceData.usdPrice > 0) {
-      // 2. Moralis Token Metadata for symbol/supply
-      const metaRes = await axios.get(`https://solana-gateway.moralis.io/token/:network/:address/metadata/${ca}`, {
-        headers: { 
-          'accept': 'application/json', 
-          'X-API-Key': process.env.MORALIS_API_KEY 
-        },
-        timeout: 3000
-      });
-      const metaData = metaRes.data;
-
-      const supply = metaData.supply || 1e9;
-      const mc = priceData.usdPrice * supply;
-
+      const mc = priceData.usdPrice * (priceData.totalSupply || 1e9);
       return {
-        symbol: metaData.symbol || ca.slice(0,8) + '...',
+        symbol,
         price: priceData.usdPrice,
         mc: formatMC(mc),
-        age: 'Live', // Use Moralis creation time if available
-        liquidity: priceData.liquidity || 0,
-        priceChange: { h1: priceData.priceChange24h || 0 } // For pump check
+        age: 'Live',
+        liquidity: priceData.liquidity?.usd || 0,
+        priceChange: { h1: priceData.priceChange?.h1 || 0 }
       };
     }
   } catch (e) {
-    console.log('Moralis failed for', ca, e.response?.status || e.message);
+    console.log('Moralis failed:', e.response?.status || e.message);
   }
 
-  // FALLBACK: Birdeye (works on everything, no key needed for basic)
+  // === 2. BIRDEYE WITH API KEY ===
   try {
     const birdRes = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
-      timeout: 4000
+      headers: {
+        'x-api-key': process.env.BIRDEYE_API_KEY,  // REQUIRED NOW
+        'accept': 'application/json'
+      },
+      timeout: 5000
     });
+
     const d = birdRes.data.data;
-    if (d.value) {
+    if (d?.value > 0) {
       return {
-        symbol: d.symbol || ca.slice(0,8) + '...',
+        symbol: d.symbol || ca.slice(0,8)+'...',
         price: d.value,
         mc: d.mc ? formatMC(d.mc) : 'N/A',
         age: 'Live',
         liquidity: d.liquidity || 0,
-        priceChange: { h1: d.priceChange?.h1 || 0 }
+        priceChange: { h1: d.priceChange24h || 0 }
       };
     }
   } catch (e) {
-    console.log('Birdeye fallback failed for', ca, e.message);
+    console.log('Birdeye failed:', e.response?.status || e.message);
   }
 
-  // LAST RESORT: Fake for challenge (use 0.000001 price to allow buy)
+  // === 3. LAST RESORT (for brand new pump.fun tokens) ===
   return {
-    symbol: ca.slice(0,8) + '...',
-    price: 0.000001, // Tiny default — PnL will show real later
+    symbol: ca.slice(0,8)+'...',
+    price: 0.000001,
     mc: 'New',
     age: 'Live',
     liquidity: 0,
     priceChange: { h1: 0 }
   };
 }
+
 // START
 bot.start(ctx => {
   ctx.replyWithMarkdownV2(esc(`*Crucible Prop Firm*\n\nJoin: ${CHANNEL_LINK}`), {
