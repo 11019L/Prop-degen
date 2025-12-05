@@ -332,78 +332,103 @@ async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update.callback_query.from.id;
   const chatId = ctx.chat?.id || ctx.update.callback_query.message.chat.id;
 
- // Inside showPositions(), replace the old drawdown code with this:
-const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])));
+  // Reset 48h inactivity timer
+  userLastActivity[userId] = Date.now();
 
-let totalPnL = 0;
-for (let i = 0; i < positions.length; i++) {
-  const p = positions[i];
-  const liveData = await Promise.all(positions.map(async (p) => {
-  const cached = priceCache.get(p.ca);
-  if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
+  const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row)));
+  if (!user) return ctx.reply('No active challenge');
 
-  const fresh = await getTokenData(p.ca);
-  priceCache.set(p.ca, { data: fresh, ts: Date.now() });
-  return fresh;
-}));
-  const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
-  totalPnL += pnlUSD;
-}
+  const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])));
 
-const equity = user.balance + totalPnL;
+  let totalPnL = 0;
+  const buttons = [];
 
-// Track peak equity (add this column once)
-if (!user.peak_equity || equity > user.peak_equity) {
-  await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [equity, userId], r));
-}
+  // === FAST PRICE FETCHING WITH CACHE ===
+  const liveData = await Promise.all(
+    positions.map(async (p) => {
+      const cached = priceCache.get(p.ca);
+      if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
 
-// Now calculate REAL relative drawdown
-const peak = user.peak_equity || user.start_balance;
-const drawdown = equity < peak ? ((peak - equity) / peak) * 100 : 0;
-const floor = peak * (1 - DRAWDOWN_MAX / 100);
-if (user.failed === 0 && equity >= user.target) {
-  await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
-
-  await ctx.replyWithPhoto(
-    { source: Buffer.from(await generatePassImage(userId, equity)) }, // you can skip image for now
-    { 
-      caption: esc(`
-CONGRATULATIONS! You passed the $${user.start_balance} challenge
-
-Final equity: $${equity.toFixed(2)}
-Profit: +$${(equity - user.start_balance).toFixed(2)}
-
-Bounty $${user.bounty} will be sent within 1–4 hours
-      `.trim()),
-      parse_mode: 'MarkdownV2'
-    }
+      const fresh = await getTokenData(p.ca);
+      priceCache.set(p.ca, { data: fresh, ts: Date.now() });
+      return fresh;
+    })
   );
-}
-// Fail only if below peak-based floor
-if (user.failed === 0 && equity < floor) {
-  await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
-}
-  if (user.failed === 0 && equity >= user.target) {
-    await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
+
+  // === LOOP THROUGH POSITIONS & CALCULATE PnL
+  for (let i = 0; i < positions.length; i++) {
+    const p = positions[i];
+    const live = liveData[i] || { price: p.entry_price, symbol: p.symbol };
+
+    const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
+    const pnlPct = p.entry_price > 0 ? ((live.price - p.entry_price) / p.entry_price) * 100 : 0;
+
+    totalPnL += pnlUSD;
+
+    const row = [{
+      text: `${live.symbol || p.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% (${pnlUSD >= 0 ? '+' : ''}$${Math.abs(pnlUSD).toFixed(2)})`,
+      callback_data: 'noop'
+    }];
+
+    if (user.failed === 0) {
+      row.push({ text: '25%', callback_data: `sell_${p.id}_25` });
+      row.push({ text: '50%', callback_data: `sell_${p.id}_50` });
+      row.push({ text: '100%', callback_data: `sell_${p.id}_100` });
+    }
+    buttons.push(row);
   }
 
-  const status = user.failed === 1 ? 'CHALLENGE FAILED (17% DD Breached)\n\n' :
-                 user.failed === 2 ? 'CHALLENGE PASSED! DM @admin\n\n' :
-                 user.failed === 3 ? 'FAILED — 48h Inactivity\n\n' : '';
+  const equity = user.balance + totalPnL;
+
+  // === PEAK EQUITY & TRAILING DRAWDOWN ===
+  if (!user.peak_equity || equity > user.peak_equity) {
+    await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [equity, userId], r));
+  }
+
+  const peak = user.peak_equity || user.start_balance;
+  const drawdown = equity < peak ? ((peak - equity) / peak) * 100 : 0;
+  const floor = peak * (1 - DRAWDOWN_MAX / 100);
+
+  // === AUTO FAIL / AUTO PASS ===
+  let justPassed = false;
+  if (user.failed === 0 && equity >= user.target) {
+    await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
+    justPassed = true;
+  }
+
+  if (user.failed === 0 && equity < floor) {
+    await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
+  }
+
+  // === STATUS MESSAGE ===
+  let status = '';
+  if (user.failed === 1) status = '*CHALLENGE FAILED* — 17% drawdown breached\n\n';
+  if (user.failed === 2) status = '*CHALLENGE PASSED!* You earned the bounty!\n\n';
+  if (user.failed === 3) status = '*FAILED* — 48h inactivity\n\n';
 
   const text = esc(`
 ${status}*LIVE POSITIONS (${positions.length})*
 
 Equity: $${equity.toFixed(2)}
 Unrealized PnL: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
-Drawdown: ${drawdown.toFixed(2)}%
+Drawdown: ${drawdown.toFixed(2)}% (from peak $${peak.toFixed(0)})
   `.trim());
 
-  const keyboard = { inline_keyboard: [...buttons, [{ text: 'Refresh', callback_data: 'refresh_pos' }], [{ text: 'Close', callback_data: 'close_pos' }]] };
+  const keyboard = {
+    inline_keyboard: [
+      ...buttons,
+      [{ text: 'Refresh', callback_data: 'refresh_pos' }],
+      [{ text: 'Close Panel', callback_data: 'close_pos' }]
+    ]
+  };
 
+  // === SEND OR EDIT MESSAGE ===
   try {
     if (positionsMessageId[userId] && ctx.update?.callback_query) {
-      await ctx.telegram.editMessageText(chatId, positionsMessageId[userId], null, text, { parse_mode: 'MarkdownV2', reply_markup: keyboard });
+      await ctx.telegram.editMessageText(chatId, positionsMessageId[userId], null, text, {
+        parse_mode: 'MarkdownV2',
+        reply_markup: keyboard
+      });
     } else {
       const sent = await ctx.replyWithMarkdownV2(text, { reply_markup: keyboard });
       positionsMessageId[userId] = sent.message_id;
@@ -411,6 +436,21 @@ Drawdown: ${drawdown.toFixed(2)}%
   } catch (e) {
     const sent = await ctx.replyWithMarkdownV2(text, { reply_markup: keyboard });
     positionsMessageId[userId] = sent.message_id;
+  }
+
+  // === AUTO CONGRATS MESSAGE ON PASS (only once) ===
+  if (justPassed) {
+    await ctx.replyWithMarkdownV2(esc(`
+*CONGRATULATIONS!* You passed the challenge!
+
+Account size: $${user.start_balance}
+Final equity: $${equity.toFixed(2)}
+Profit made: +$${(equity - user.start_balance).toFixed(2)}
+
+Your $${user.bounty} bounty will be sent within 1–4 hours.
+
+Thank you for trading with Crucible
+    `.trim()));
   }
 }
 
