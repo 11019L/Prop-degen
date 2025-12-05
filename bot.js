@@ -9,10 +9,11 @@ const app = express();
 app.use(express.json());
 
 const db = new sqlite3.Database('crucible.db');
+db.exec('PRAGMA journal_mode = WAL;'); // Better concurrency
 async function showPositions(ctx) {
 
 // CRITICAL FOR RENDER: Add a persistent disk at /opt/render/project/src/crucible.db in Render dashboard
-db.exec('PRAGMA journal_mode = WAL;'); // Better concurrency
+
 
 const ADMIN_ID = Number(process.env.ADMIN_ID);
 const ACTIVE_POSITION_PANELS = new Map();
@@ -354,6 +355,66 @@ bot.on('text', async ctx => {
 });
 
 // FINAL POSITIONS PANEL — NEVER BREAKS
+
+// SELL
+bot.action(/sell_(\d+)_(\d+)/, async ctx => {
+  await ctx.answerCbQuery('Selling…');
+
+  const posId = ctx.match[1];
+  const percent = Number(ctx.match[2]); // 25, 50 or 100
+  const userId = ctx.from.id;
+
+  const pos = await new Promise(r => db.get('SELECT * FROM positions WHERE id = ? AND user_id = ?', [posId, userId], (_, row) => r(row)));
+  if (!pos || percent <= 0 || percent > 100) return;
+
+  const token = await getTokenData(pos.ca) || { price: pos.entry_price };
+  const currentPrice = token.price;
+
+  // How much we are selling now
+  const tokensToSell = pos.tokens_bought * (percent / 100);
+  const usdFromSell = tokensToSell * currentPrice;
+  const pnlFromThisSell = (currentPrice - pos.entry_price) * tokensToSell;
+
+  // Credit user
+  await new Promise(r => db.run(
+    'UPDATE users SET balance = balance + ? WHERE user_id = ?',
+    [usdFromSell + pnlFromThisSell, userId], r
+  ));
+  userLastActivity[userId] = Date.now();
+  if (percent === 100) {
+    // Full close → delete row
+    await new Promise(r => db.run('DELETE FROM positions WHERE id = ?', [posId], r));
+  } else {
+    // Partial close → reduce the position size in DB
+    const remainingPercent = (100 - percent) / 100;
+    await new Promise(r => db.run(`
+      UPDATE positions 
+      SET tokens_bought = tokens_bought * ?, 
+          amount_usd = amount_usd * ?
+      WHERE id = ?`, [remainingPercent, remainingPercent, posId], r));
+  }
+
+  await ctx.replyWithMarkdownV2(esc(`
+*SOLD ${percent}%* ${pos.symbol}
+
+Proceeds: $${usdFromSell.toFixed(2)}
+PnL this sell: ${pnlFromThisSell >= 0 ? '+' : ''}$${pnlFromThisSell.toFixed(2)}
+`.trim()));
+
+  showPositions(ctx);
+});
+
+// INACTIVITY CHECK
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, last] of Object.entries(userLastActivity)) {
+    if (now - last > INACTIVITY_HOURS * 3600000) {
+      db.run('UPDATE users SET failed=3 WHERE user_id=? AND failed=0', [userId]);
+      delete userLastActivity[userId];
+    }
+  }
+}, 6 * 3600000);
+
 async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update.callback_query.from.id;
   const chatId = ctx.chat?.id || ctx.update.callback_query.message.chat.id;
@@ -492,65 +553,6 @@ bot.action('close_pos', async ctx => {
   }
   await ctx.deleteMessage();
 });
-
-// SELL
-bot.action(/sell_(\d+)_(\d+)/, async ctx => {
-  await ctx.answerCbQuery('Selling…');
-
-  const posId = ctx.match[1];
-  const percent = Number(ctx.match[2]); // 25, 50 or 100
-  const userId = ctx.from.id;
-
-  const pos = await new Promise(r => db.get('SELECT * FROM positions WHERE id = ? AND user_id = ?', [posId, userId], (_, row) => r(row)));
-  if (!pos || percent <= 0 || percent > 100) return;
-
-  const token = await getTokenData(pos.ca) || { price: pos.entry_price };
-  const currentPrice = token.price;
-
-  // How much we are selling now
-  const tokensToSell = pos.tokens_bought * (percent / 100);
-  const usdFromSell = tokensToSell * currentPrice;
-  const pnlFromThisSell = (currentPrice - pos.entry_price) * tokensToSell;
-
-  // Credit user
-  await new Promise(r => db.run(
-    'UPDATE users SET balance = balance + ? WHERE user_id = ?',
-    [usdFromSell + pnlFromThisSell, userId], r
-  ));
-  userLastActivity[userId] = Date.now();
-  if (percent === 100) {
-    // Full close → delete row
-    await new Promise(r => db.run('DELETE FROM positions WHERE id = ?', [posId], r));
-  } else {
-    // Partial close → reduce the position size in DB
-    const remainingPercent = (100 - percent) / 100;
-    await new Promise(r => db.run(`
-      UPDATE positions 
-      SET tokens_bought = tokens_bought * ?, 
-          amount_usd = amount_usd * ?
-      WHERE id = ?`, [remainingPercent, remainingPercent, posId], r));
-  }
-
-  await ctx.replyWithMarkdownV2(esc(`
-*SOLD ${percent}%* ${pos.symbol}
-
-Proceeds: $${usdFromSell.toFixed(2)}
-PnL this sell: ${pnlFromThisSell >= 0 ? '+' : ''}$${pnlFromThisSell.toFixed(2)}
-`.trim()));
-
-  showPositions(ctx);
-});
-
-// INACTIVITY CHECK
-setInterval(() => {
-  const now = Date.now();
-  for (const [userId, last] of Object.entries(userLastActivity)) {
-    if (now - last > INACTIVITY_HOURS * 3600000) {
-      db.run('UPDATE users SET failed=3 WHERE user_id=? AND failed=0', [userId]);
-      delete userLastActivity[userId];
-    }
-  }
-}, 6 * 3600000);
 
 // LAUNCH
 bot.launch();
