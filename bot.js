@@ -378,41 +378,37 @@ async function showPositions(ctx) {
     buttons.push(row);
   }
 
-  const currentEquity = user.balance + totalPnL;
-
   // === PEAK EQUITY & TRAILING DRAWDOWN ===
-  const MIN_PROFIT_TO_UPDATE_PEAK = 2.0; // $2 minimum profit before we raise the floor
+   const equity = user.balance + totalPnL;   // ← THIS LINE MUST EXIST
+
+  // === PEAK EQUITY & TRAILING DRAWDOWN (SAFE VERSION) ===
+  const MIN_PROFIT_TO_UPDATE_PEAK = 2.0; // don't raise floor on tiny pumps
 
   let shouldUpdatePeak = false;
-  if (user.peak_equity === null || user.peak_equity === undefined) {
-    shouldUpdatePeak = true; // first time
-  } else if (currentEquity > user.peak_equity + MIN_PROFIT_TO_UPDATE_PEAK) {
+  if (!user.peak_equity || user.peak_equity < user.start_balance) {
+    shouldUpdatePeak = true;
+  } else if (equity > user.peak_equity + MIN_PROFIT_TO_UPDATE_PEAK) {
     shouldUpdatePeak = true;
   }
 
   if (shouldUpdatePeak) {
-    await new Promise(r => db.run(
-      'UPDATE users SET peak_equity = ? WHERE user_id = ?',
-      [currentEquity, userId], r
-    ));
+    await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [equity, userId], r));
   }
 
   const peak = user.peak_equity || user.start_balance;
-  const drawdown = currentEquity < peak 
-    ? ((peak - currentEquity) / peak) * 100 
-    : 0;
+  const drawdown = equity < peak ? ((peak - equity) / peak) * 100 : 0;
+  const floor = peak * (1 - DRAWDOWN_MAX / 100);
 
-  const floor = peak * (1 - DRAWDOWN_MAX / 100); // 17%
+  // === AUTO FAIL ===
+  if (user.failed === 0 && equity < floor) {
+    await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
+  }
 
-  // === AUTO FAIL / AUTO PASS ===
+  // === AUTO PASS ===
   let justPassed = false;
   if (user.failed === 0 && equity >= user.target) {
     await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
     justPassed = true;
-  }
-
-  if (user.failed === 0 && equity < floor) {
-    await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
   }
 
   // === STATUS MESSAGE ===
