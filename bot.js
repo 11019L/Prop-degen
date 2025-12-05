@@ -10,7 +10,6 @@ app.use(express.json());
 
 const db = new sqlite3.Database('crucible.db');
 db.exec('PRAGMA journal_mode = WAL;'); // Better concurrency
-async function showPositions(ctx) {
 
 // CRITICAL FOR RENDER: Add a persistent disk at /opt/render/project/src/crucible.db in Render dashboard
 
@@ -458,20 +457,6 @@ async function showPositions(ctx) {
   ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
 }
   // === AUTO CONGRATS MESSAGE ON PASS (only once) ===
-  if (justPassed) {
-    await ctx.replyWithMarkdownV2(esc(`
-*CONGRATULATIONS!* You passed the challenge!
-
-Account size: $${user.start_balance}
-Final equity: $${equity.toFixed(2)}
-Profit made: +$${(equity - user.start_balance).toFixed(2)}
-
-Your $${user.bounty} bounty will be sent within 1–4 hours.
-
-Thank you for trading with Crucible
-    `.trim()));
-  }
-}
 
 async function renderPanel(userId, chatId, messageId) {
   const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row)));
