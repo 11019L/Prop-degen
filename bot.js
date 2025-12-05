@@ -458,12 +458,22 @@ async function renderPanel(userId, chatId, messageId) {
     ]);
   }
 
-  const equity = user.balance + totalPnL;
-  const peak = user.peak_equity || user.start_balance;
-  if (equity > peak + 2) {
-    await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [equity, userId], r));
-  }
-  const drawdown = equity < peak ? ((peak - equity) / peak) * 100 : 0;
+  let peak = user.peak_equity || user.start_balance;
+
+// Only raise peak when equity is meaningfully higher
+if (equity > peak) {
+  peak = equity;
+  await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [equity, userId], r));
+}
+
+const maxDrawdownPercent = 17;
+const floor = peak * (1 - maxDrawdownPercent / 100);
+const currentDrawdown = peak > equity ? ((peak - equity) / peak) * 100 : 0;
+
+// Auto-fail if breached
+if (user.failed === 0 && equity < floor) {
+  await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
+}
 
   const text = esc(`
 *LIVE POSITIONS* (real-time)
