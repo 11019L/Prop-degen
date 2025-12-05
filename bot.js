@@ -188,16 +188,22 @@ userLastActivity[userId] = Date.now();
 });
 
 // ADMIN TEST
-// ADMIN TEST — FINAL WORKING VERSION (tested live)
+// ADMIN TEST — FINAL FIX (auto-creates peak_equity column + works forever)
 bot.command('admin_test', async ctx => {
   if (ctx.from.id !== ADMIN_ID) return;
 
   const pay = Number(ctx.message.text.split(' ')[1]);
-  if (![20, 30, 40, 50].includes(pay)) {
-    return ctx.reply('Usage: /admin_test 20|30|40|50');
-  }
+  if (![20,30,40,50].includes(pay)) return ctx.reply('Usage: /admin_test 20|30|40|50');
 
   const tier = TIERS[pay];
+
+  // ←←← THIS FIXES THE MISSING COLUMN AUTOMATICALLY ←←←
+  try {
+    await new Promise(r => db.run('ALTER TABLE users ADD COLUMN peak_equity REAL', [], r));
+    console.log('Added missing peak_equity column');
+  } catch (e) {
+    // column already exists → ignore error
+  }
 
   await new Promise(r => db.run(`
     INSERT OR REPLACE INTO users 
@@ -205,29 +211,22 @@ bot.command('admin_test', async ctx => {
     VALUES (?, 1, ?, ?, ?, ?, 0, ?)
   `, [ctx.from.id, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance], r));
 
-  // Kill any old auto-refresh panel
+  await new Promise(r => db.run('DELETE FROM positions WHERE user_id = ?', [ctx.from.id], r));
+
   if (ACTIVE_POSITION_PANELS.has(ctx.from.id)) {
     clearInterval(ACTIVE_POSITION_PANELS.get(ctx.from.id).intervalId);
     ACTIVE_POSITION_PANELS.delete(ctx.from.id);
   }
 
-  // Delete any old positions from previous test
-  await new Promise(r => db.run('DELETE FROM positions WHERE user_id = ?', [ctx.from.id], r));
-
   await ctx.replyWithMarkdownV2(esc(`
-*ADMIN TEST ACCOUNT CREATED & READY*
+*ADMIN TEST ACCOUNT READY* 
 
-Tier: $${pay} → $${tier.balance} account
+Tier: $${pay} → $${tier.balance}
 Target: $${tier.target}
 Bounty: $${tier.bounty}
 
-Everything reset. Send any CA to buy or tap button below.
-  `.trim()), {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: "Open Live Positions", callback_data: "refresh_pos" }]
-      ]
-    }
+Everything fixed & ready\\! Paste any CA to trade\\.`.trim()), {
+    reply_markup: { inline_keyboard: [[{ text: "Open Positions", callback_data: "refresh_pos" }]] }
   });
 });
 // BUY FLOW
