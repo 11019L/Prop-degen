@@ -283,10 +283,21 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
   }
 
   if (!success) {
-    // Last resort: Use Moralis price — buy "simulated" for challenge
-    entryPrice = token.price;
-    tokensBought = amountUSD / entryPrice;
+  // All pump.fun coins have exactly 1,000,000,000 tokens total supply
+  const PUMP_FUN_SUPPLY = 1_000_000_000;
+
+  // Use the market cap we actually saw when user clicked buy
+  let currentMC = 9000; // fallback if everything is broken
+  if (token.mc && token.mc !== 'New') {
+    currentMC = parseFloat(token.mc.replace(/[^\d.]/g, '')) * (token.mc.includes('k') ? 1000 : 1000000);
   }
+
+  // Force correct token amount and entry price
+  tokensBought = (amountUSD / currentMC) * PUMP_FUN_SUPPLY;
+  entryPrice   = currentMC / PUMP_FUN_SUPPLY;
+
+  console.log(`Jupiter failed → forced pump.fun math: MC $${currentMC} → ${tokensBought.toFixed(0)} tokens @ $${entryPrice}`);
+}
 
   // Save to DB
   await new Promise(r => {
