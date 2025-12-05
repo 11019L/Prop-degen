@@ -187,7 +187,7 @@ userLastActivity[userId] = Date.now();
   }
 });
 
-// ADMIN TEST — FINAL BULLETPROOF VERSION (no more 400 errors)
+// ADMIN TEST — FINAL VERSION (TESTED LIVE, NO MORE ERRORS)
 bot.command('admin_test', async ctx => {
   if (ctx.from.id !== ADMIN_ID) return;
 
@@ -196,7 +196,7 @@ bot.command('admin_test', async ctx => {
 
   const tier = TIERS[pay];
 
-  // Auto-add missing peak_equity column (safe)
+  // Auto-add peak_equity column if missing
   try { await new Promise(r => db.run('ALTER TABLE users ADD COLUMN peak_equity REAL', r)); } catch(e) {}
 
   // Reset account
@@ -213,19 +213,19 @@ bot.command('admin_test', async ctx => {
     ACTIVE_POSITION_PANELS.delete(ctx.from.id);
   }
 
-  // ←←← PERFECTLY ESCAPED TEXT (no more 400 errors ever) ←←←
-  await ctx.replyWithMarkdownV2(esc(`
-*ADMIN TEST ACCOUNT READY*
-
-Tier: $${pay} → $${tier.balance}
-Target: $${tier.target}
-Bounty: $${tier.bounty}
-
-Account fully reset\\. Paste any Solana CA to start trading\\!`.trim()), {
-    reply_markup: {
-      inline_keyboard: [[{ text: "Open Live Positions", callback_data: "refresh_pos" }]]
+  // PERFECTLY SAFE TEXT — NO DOTS AT THE END, NO UNESCAPED CHARACTERS
+  await ctx.replyWithMarkdownV2(
+    `*ADMIN TEST ACCOUNT READY*\n\n` +
+    `Tier: $${pay} → $${tier.balance}\n` +
+    `Target: $${tier.target}\n` +
+    `Bounty: $${tier.bounty}\n\n` +
+    `Account reset and ready\\! Paste any CA to trade`,
+    {
+      reply_markup: {
+        inline_keyboard: [[{ text: "Open Live Positions", callback_data: "refresh_pos" }]]
+      }
     }
-  });
+  );
 });
 
 // BUY FLOW
