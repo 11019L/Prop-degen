@@ -457,36 +457,50 @@ async function renderPanel(userId, chatId, messageId) {
       ] : [])
     ]);
   }
-// PEAK EQUITY & DRAWDOWN — FINAL 100% CORRECT VERSION
-const equity = user.balance + totalPnL;          // ← THIS LINE WAS MISSING
 
-let peak = user.peak_equity || user.start_balance;
+  const equity = user.balance + totalPnL;
 
-// Raise peak instantly when you go higher (no $2 minimum nonsense)
-if (equity > peak) {
-  peak = equity;
-  await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [equity, userId], r));
-}
+  // PEAK EQUITY & 17% DRAWDOWN — 100% CORRECT
+  let peak = user.peak_equity || user.start_balance;
+  if (equity > peak) {
+    peak = equity;
+    await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [equity, userId], r));
+  }
 
-const floor = peak * (1 - 17 / 100);              // 17% drawdown floor
-const drawdown = ((peak - equity) / peak) * 100;
+  const floor = peak * (1 - 17 / 100);
+  const drawdown = equity < peak ? ((peak - equity) / peak) * 100 : 0;
 
-// Auto-fail the second you breach 17%
-if (user.failed === 0 && equity < floor) {
-  await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
+  // Auto-fail on 17% breach
+  if (user.failed === 0 && equity < floor) {
+    await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
+  }
+
+  // Auto-pass
+  if (user.failed === 0 && equity >= user.target) {
+    await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
+  }
+
+  const status = user.failed === 1 ? '*CHALLENGE FAILED — 17% DD BREACHED*\n\n' :
+                 user.failed === 2 ? '*CHALLENGE PASSED\\!*\n\n' : '';
 
   const text = esc(`
-*LIVE POSITIONS* (real-time)
+${status}*LIVE POSITIONS* (real-time)
 
 Equity: $${equity.toFixed(2)}
 Unrealized PnL: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
-Drawdown: ${drawdown.toFixed(2)}%
+Drawdown: ${drawdown.toFixed(2)}% (max 17%)
 ${positions.length === 0 ? '\nNo open positions' : ''}
   `.trim());
 
   await bot.telegram.editMessageText(chatId, messageId, null, text, {
     parse_mode: 'MarkdownV2',
-    reply_markup: { inline_keyboard: [...buttons, [{ text: 'Refresh', callback_data: 'refresh_pos' }], [{ text: 'Close', callback_data: 'close_pos' }]] }
+    reply_markup: {
+      inline_keyboard: [
+        ...buttons,
+        [{ text: 'Refresh', callback_data: 'refresh_pos' }],
+        [{ text: 'Close Panel', callback_data: 'close_pos' }]
+      ]
+    }
   }).catch(() => {}); // ignore if message deleted
 }
 
