@@ -15,6 +15,7 @@ async function showPositions(ctx) {
 db.exec('PRAGMA journal_mode = WAL;'); // Better concurrency
 
 const ADMIN_ID = Number(process.env.ADMIN_ID);
+const ACTIVE_POSITION_PANELS = new Map();
 const CHANNEL_LINK = "https://t.me/Crucibleprop";
 const priceCache = new Map(); // ca → {price, symbol, mc, ts}
 const CACHE_TTL = 8000; // 8 seconds
@@ -187,7 +188,7 @@ userLastActivity[userId] = Date.now();
 });
 
 // ADMIN TEST
-// ADMIN TEST — FIXED & WORKING AGAIN
+// ADMIN TEST — FINAL WORKING VERSION (tested live)
 bot.command('admin_test', async ctx => {
   if (ctx.from.id !== ADMIN_ID) return;
 
@@ -198,35 +199,37 @@ bot.command('admin_test', async ctx => {
 
   const tier = TIERS[pay];
 
-  // Reset everything for this user
-  await new Promise(r => db.run(
-    `INSERT OR REPLACE INTO users 
-     (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity)
-     VALUES (?, 1, ?, ?, ?, ?, 0, ?)`,
-    [ctx.from.id, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance], r
-  ));
+  await new Promise(r => db.run(`
+    INSERT OR REPLACE INTO users 
+    (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity)
+    VALUES (?, 1, ?, ?, ?, ?, 0, ?)
+  `, [ctx.from.id, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance], r));
 
-  // Clean any old auto-refresh panel
+  // Kill any old auto-refresh panel
   if (ACTIVE_POSITION_PANELS.has(ctx.from.id)) {
     clearInterval(ACTIVE_POSITION_PANELS.get(ctx.from.id).intervalId);
     ACTIVE_POSITION_PANELS.delete(ctx.from.id);
   }
 
-  ctx.replyWithMarkdownV2(esc(`
-ADMIN TEST ACCOUNT READY
+  // Delete any old positions from previous test
+  await new Promise(r => db.run('DELETE FROM positions WHERE user_id = ?', [ctx.from.id], r));
 
-Tier: $${pay} → $${tier.balance}
+  await ctx.replyWithMarkdownV2(esc(`
+*ADMIN TEST ACCOUNT CREATED & READY*
+
+Tier: $${pay} → $${tier.balance} account
 Target: $${tier.target}
 Bounty: $${tier.bounty}
 
-Send any Solana CA to start trading\\.  
-Click below to open live positions panel\\.`.trim()), {
+Everything reset. Send any CA to buy or tap button below.
+  `.trim()), {
     reply_markup: {
-      inline_keyboard: [[{ text: "Open Positions", callback_data: "refresh_pos" }]]
+      inline_keyboard: [
+        [{ text: "Open Live Positions", callback_data: "refresh_pos" }]
+      ]
     }
   });
 });
-
 // BUY FLOW
 async function handleBuy(ctx, ca) {
   const row = await new Promise(r => db.get('SELECT balance FROM users WHERE user_id=? AND paid=1', [ctx.from.id], (_, row) => r(row)));
