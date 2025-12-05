@@ -247,7 +247,7 @@ const newTokens = newTokensRes.data.result; // Array of {tokenAddress, priceUsd,
 }
 
 bot.action(/buy\|(.+)\|(.+)/, async ctx => {
-  await ctx.answerCbQuery('Sniping…');
+  await ctx.answerCbQuery('Sniping…').catch(() => {});
 
   const ca = ctx.match[1].trim();
   const amountUSD = Number(ctx.match[2]);
@@ -318,22 +318,19 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
   userLastActivity[userId] = Date.now();
 
   // === 6. CONFIRMATION MESSAGE ===
-  await ctx.editMessageText(esc(`
-BUY EXECUTED SUCCESSFULLY
+   await ctx.editMessageText(esc(`
+BUY EXECUTED
 
 ${token.symbol}
 Size: $${amountUSD}
 Tokens: ${tokensBought.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
-Entry Price: $${entryPrice.toFixed(12)}
-Current MC: ${token.mc}
-Liquidity: $${Number(token.liquidity || 0).toFixed(0)}
+Entry: $${entryPrice.toFixed(12)}
+MC: ${token.mc}
 
-Cash left: $${(account.balance - amountUSD).toFixed(2)}
+Balance left: $${(account.balance - amountUSD).toFixed(2)}
   `.trim()), {
     parse_mode: 'MarkdownV2',
-    reply_markup: {
-      inline_keyboard: [[{ text: "Positions", callback_data: "refresh_pos" }]]
-    }
+    reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "refresh_pos" }]] }
   });
 });
 
@@ -417,22 +414,21 @@ async function showPositions(ctx) {
     ACTIVE_POSITION_PANELS.delete(userId);
   }
 
-  let messageId;
-  if (ctx.update?.callback_query?.message?.message_id) {
-    messageId = ctx.update.callback_query.message.message_id;
-  } else {
-    const sent = await ctx.replyWithMarkdownV2('Loading positions\\.\\.\\.');
+  let messageId = ctx.update?.callback_query?.message?.message_id;
+  if (!messageId) {
+    const sent = await ctx.replyWithMarkdownV2('Loading live positions\\.\\.\\.');
     messageId = sent.message_id;
   }
 
   await renderPanel(userId, chatId, messageId);
 
   const intervalId = setInterval(() => {
-    renderPanel(userId, chatId, messageId).catch(() => {
+    renderPanel(userId, chatId, messageId).catch(err => {
+      console.log("Panel stopped:", err.message);
       clearInterval(intervalId);
       ACTIVE_POSITION_PANELS.delete(userId);
     });
-  }, 2300);
+  }, 2200);
 
   ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
 }
@@ -446,17 +442,14 @@ async function renderPanel(userId, chatId, messageId) {
   let totalPnL = 0;
   const buttons = [];
 
-  const liveData = await Promise.all(positions.map(p => getTokenData(p.ca)));
-
-  for (let i = 0; i < positions.length; i++) {
-    const p = positions[i];
-    const live = liveData[i];
+  for (const p of positions) {
+    const live = await getTokenData(p.ca);
     const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
-    const pnlPct = ((live.price - p.entry_price) / p.entry_price) * 100;
+    const pnlPct = p.entry_price > 0 ? ((live.price - p.entry_price) / p.entry_price) * 100 : 0;
     totalPnL += pnlUSD;
 
     buttons.push([
-      { text: `${live.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%`, callback_data: 'noop' },
+      { text: `${live.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% ($${pnlUSD.toFixed(2)})`, callback_data: 'noop' },
       ...(user.failed === 0 ? [
         { text: '25%', callback_data: `sell_${p.id}_25` },
         { text: '50%', callback_data: `sell_${p.id}_50` },
@@ -466,18 +459,17 @@ async function renderPanel(userId, chatId, messageId) {
   }
 
   const equity = user.balance + totalPnL;
-  let peak = user.peak_equity || user.start_balance;
+  const peak = user.peak_equity || user.start_balance;
   if (equity > peak + 2) {
     await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [equity, userId], r));
-    peak = equity;
   }
   const drawdown = equity < peak ? ((peak - equity) / peak) * 100 : 0;
 
   const text = esc(`
-*LIVE POSITIONS* (auto-updating)
+*LIVE POSITIONS* (real-time)
 
 Equity: $${equity.toFixed(2)}
-Unrealized: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
+Unrealized PnL: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
 Drawdown: ${drawdown.toFixed(2)}%
 ${positions.length === 0 ? '\nNo open positions' : ''}
   `.trim());
@@ -485,7 +477,7 @@ ${positions.length === 0 ? '\nNo open positions' : ''}
   await bot.telegram.editMessageText(chatId, messageId, null, text, {
     parse_mode: 'MarkdownV2',
     reply_markup: { inline_keyboard: [...buttons, [{ text: 'Refresh', callback_data: 'refresh_pos' }], [{ text: 'Close', callback_data: 'close_pos' }]] }
-  });
+  }).catch(() => {}); // ignore if message deleted
 }
 
 bot.action('refresh_pos', async ctx => {
