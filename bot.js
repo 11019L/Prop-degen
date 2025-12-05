@@ -419,7 +419,7 @@ async function showPositions(ctx) {
 
   userLastActivity[userId] = Date.now();
 
-  // Kill any old panel
+  // Kill old panel
   if (ACTIVE_POSITION_PANELS.has(userId)) {
     clearInterval(ACTIVE_POSITION_PANELS.get(userId).intervalId);
     ACTIVE_POSITION_PANELS.delete(userId);
@@ -429,19 +429,14 @@ async function showPositions(ctx) {
   if (ctx.update?.callback_query?.message?.message_id) {
     messageId = ctx.update.callback_query.message.message_id;
   } else {
-    const sent = await ctx.replyWithMarkdownV2('Loading positions\\.\.\.', {
-      reply_markup: { inline_keyboard: [[{ text: 'Close', callback_data: 'close_pos' }]] }
-    });
+    const sent = await ctx.replyWithMarkdownV2('Loading positions\\.\\.\\.');
     messageId = sent.message_id;
   }
 
-  // First render
   await renderPanel(userId, chatId, messageId);
 
-  // Auto-refresh every 2.3 seconds
   const intervalId = setInterval(() => {
-    renderPanel(userId, chatId, messageId).catch(err => {
-      console.log('Auto-refresh stopped:', err.message);
+    renderPanel(userId, chatId, messageId).catch(() => {
       clearInterval(intervalId);
       ACTIVE_POSITION_PANELS.delete(userId);
     });
@@ -449,7 +444,6 @@ async function showPositions(ctx) {
 
   ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
 }
-  // === AUTO CONGRATS MESSAGE ON PASS (only once) ===
 
 async function renderPanel(userId, chatId, messageId) {
   const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row)));
@@ -460,72 +454,52 @@ async function renderPanel(userId, chatId, messageId) {
   let totalPnL = 0;
   const buttons = [];
 
-  if (positions.length > 0) {
-    const liveData = await Promise.all(positions.map(p => getTokenData(p.ca)));
+  const liveData = await Promise.all(positions.map(p => getTokenData(p.ca)));
 
-    for (let i = 0; i < positions.length; i++) {
-      const p = positions[i];
-      const live = liveData[i] || { price: p.entry_price, symbol: p.symbol };
+  for (let i = 0; i < positions.length; i++) {
+    const p = positions[i];
+    const live = liveData[i];
+    const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
+    const pnlPct = ((live.price - p.entry_price) / p.entry_price) * 100;
+    totalPnL += pnlUSD;
 
-      const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
-      const pnlPct = p.entry_price > 0 ? ((live.price - p.entry_price) / p.entry_price) * 100 : 0;
-      totalPnL += pnlUSD;
-
-      buttons.push([
-        { text: `${live.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% ($${pnlUSD.toFixed(2)})`, callback_data: 'noop' },
-        ...(user.failed === 0 ? [
-          { text: '25%', callback_data: `sell_${p.id}_25` },
-          { text: '50%', callback_data: `sell_${p.id}_50` },
-          { text: '100%', callback_data: `sell_${p.id}_100` }
-        ] : [])
-      ]);
-    }
+    buttons.push([
+      { text: `${live.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%`, callback_data: 'noop' },
+      ...(user.failed === 0 ? [
+        { text: '25%', callback_data: `sell_${p.id}_25` },
+        { text: '50%', callback_data: `sell_${p.id}_50` },
+        { text: '100%', callback_data: `sell_${p.id}_100` }
+      ] : [])
+    ]);
   }
 
   const equity = user.balance + totalPnL;
-
-  // Peak equity update
   let peak = user.peak_equity || user.start_balance;
   if (equity > peak + 2) {
-    peak = equity;
     await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [equity, userId], r));
+    peak = equity;
   }
-
   const drawdown = equity < peak ? ((peak - equity) / peak) * 100 : 0;
 
-  // Auto-fail/pass
-  if (user.failed === 0 && equity < peak * (1 - DRAWDOWN_MAX / 100)) {
-    await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
-  }
-  if (user.failed === 0 && equity >= user.target) {
-    await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
-  }
-
-  const status = user.failed === 1 ? '*FAILED — 17% DD*\n\n' :
-                 user.failed === 2 ? '*PASSED\\!*\n\n' :
-                 user.failed === 3 ? '*FAILED — Inactivity*\n\n' : '';
-
   const text = esc(`
-${status}*LIVE POSITIONS* (auto-updating)
+*LIVE POSITIONS* (auto-updating)
 
 Equity: $${equity.toFixed(2)}
 Unrealized: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
-Drawdown: ${drawdown.toFixed(2)}% ${drawdown > 15 ? 'Warning' : ''}
+Drawdown: ${drawdown.toFixed(2)}%
 ${positions.length === 0 ? '\nNo open positions' : ''}
   `.trim());
 
   await bot.telegram.editMessageText(chatId, messageId, null, text, {
     parse_mode: 'MarkdownV2',
-    reply_markup: {
-      inline_keyboard: [
-        ...buttons,
-        [{ text: 'Refresh', callback_data: 'refresh_pos' }],
-        [{ text: 'Close', callback_data: 'close_pos' }]
-      ]
-    }
+    reply_markup: { inline_keyboard: [...buttons, [{ text: 'Refresh', callback_data: 'refresh_pos' }], [{ text: 'Close', callback_data: 'close_pos' }]] }
   });
 }
 
+bot.action('refresh_pos', async ctx => {
+  await ctx.answerCbQuery();
+  await showPositions(ctx);
+});
 bot.action('close_pos', async ctx => {
   await ctx.answerCbQuery();
   const userId = ctx.from.id;
@@ -535,6 +509,7 @@ bot.action('close_pos', async ctx => {
   }
   await ctx.deleteMessage();
 });
+
 
 // LAUNCH
 bot.launch();
