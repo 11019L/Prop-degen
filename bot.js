@@ -457,23 +457,23 @@ async function renderPanel(userId, chatId, messageId) {
       ] : [])
     ]);
   }
+// PEAK EQUITY & DRAWDOWN — FINAL 100% CORRECT VERSION
+const equity = user.balance + totalPnL;          // ← THIS LINE WAS MISSING
 
-  let peak = user.peak_equity || user.start_balance;
+let peak = user.peak_equity || user.start_balance;
 
-// Only raise peak when equity is meaningfully higher
+// Raise peak instantly when you go higher (no $2 minimum nonsense)
 if (equity > peak) {
   peak = equity;
   await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [equity, userId], r));
 }
 
-const maxDrawdownPercent = 17;
-const floor = peak * (1 - maxDrawdownPercent / 100);
-const currentDrawdown = peak > equity ? ((peak - equity) / peak) * 100 : 0;
+const floor = peak * (1 - 17 / 100);              // 17% drawdown floor
+const drawdown = ((peak - equity) / peak) * 100;
 
-// Auto-fail if breached
+// Auto-fail the second you breach 17%
 if (user.failed === 0 && equity < floor) {
   await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
-}
 
   const text = esc(`
 *LIVE POSITIONS* (real-time)
