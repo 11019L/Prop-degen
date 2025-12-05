@@ -189,6 +189,7 @@ userLastActivity[userId] = Date.now();
 
 // ADMIN TEST
 // ADMIN TEST — FINAL FIX (auto-creates peak_equity column + works forever)
+// ADMIN TEST — 100% WORKING (no more Markdown errors + auto-fixes peak_equity)
 bot.command('admin_test', async ctx => {
   if (ctx.from.id !== ADMIN_ID) return;
 
@@ -197,14 +198,12 @@ bot.command('admin_test', async ctx => {
 
   const tier = TIERS[pay];
 
-  // ←←← THIS FIXES THE MISSING COLUMN AUTOMATICALLY ←←←
+  // Auto-add missing peak_equity column (safe – ignores if exists)
   try {
-    await new Promise(r => db.run('ALTER TABLE users ADD COLUMN peak_equity REAL', [], r));
-    console.log('Added missing peak_equity column');
-  } catch (e) {
-    // column already exists → ignore error
-  }
+    await new Promise(r => db.run('ALTER TABLE users ADD COLUMN peak_equity REAL', r));
+  } catch (e) { /* column already exists → ignore */ }
 
+  // Reset account
   await new Promise(r => db.run(`
     INSERT OR REPLACE INTO users 
     (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity)
@@ -219,14 +218,16 @@ bot.command('admin_test', async ctx => {
   }
 
   await ctx.replyWithMarkdownV2(esc(`
-*ADMIN TEST ACCOUNT READY* 
+*ADMIN TEST ACCOUNT READY*
 
 Tier: $${pay} → $${tier.balance}
 Target: $${tier.target}
 Bounty: $${tier.bounty}
 
-Everything fixed & ready\\! Paste any CA to trade\\.`.trim()), {
-    reply_markup: { inline_keyboard: [[{ text: "Open Positions", callback_data: "refresh_pos" }]] }
+Everything reset \\& ready\\. Paste any Solana CA to start trading\\.`.trim()), {
+    reply_markup: {
+      inline_keyboard: [[{ text: "Open Live Positions", callback_data: "refresh_pos" }]]
+    }
   });
 });
 // BUY FLOW
