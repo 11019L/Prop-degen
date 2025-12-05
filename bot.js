@@ -230,99 +230,87 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
   const amountUSD = Number(ctx.match[2]);
   const userId = ctx.from.id;
 
-  // Rules (unchanged)
+  // === 1. BASIC ACCOUNT & RULES CHECKS ===
   const account = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row)));
   if (!account || account.failed !== 0) return ctx.editMessageText('Challenge over');
   if (amountUSD > account.balance) return ctx.editMessageText('Not enough balance');
-  if (amountUSD > account.start_balance * 0.25) return ctx.editMessageText(`Max 25% ($${(account.start_balance*0.25).toFixed(0)})`);
+  if (amountUSD > account.start_balance * MAX_POSITION_PERCENT) return ctx.editMessageText(`Max 25% ($${(account.start_balance * 0.25).toFixed(0)})`);
 
-  const today = new Date().toISOString().slice(0,10);
-  const tradesToday = await new Promise(r => db.get(`SELECT COUNT(*) as c FROM positions WHERE user_id=? AND DATE(created_at/1000,'unixepoch')=?`, [userId, today], (_,row) => r(row?.c || 0)));
-  if (tradesToday >= 5) return ctx.editMessageText('Max 5 trades/day');
+  const today = new Date().toISOString().slice(0, 10);
+  const tradesToday = await new Promise(r => db.get(`SELECT COUNT(*) as c FROM positions WHERE user_id=? AND DATE(created_at/1000,'unixepoch')=?`, [userId, today], (_, row) => r(row?.c || 0)));
+  if (tradesToday >= MAX_TRADES_PER_DAY) return ctx.editMessageText('Max 5 trades/day');
 
-  // === MORALIS FOR INSTANT DATA ===
+  // === 2. GET TOKEN DATA (price + symbol + checks) ===
   const token = await getTokenData(ca);
-  if (!token || token.price <= 0) return ctx.editMessageText('Token data unavailable — try in 30s');
-  if (token.priceChange.h1 > 300) return ctx.editMessageText('Pumped >300% — blocked');
+  if (!token || token.price <= 0) return ctx.editMessageText('Token data unavailable — try again in 30s');
+  if (token.priceChange?.h1 > 300) return ctx.editMessageText('Pumped >300% in last hour — blocked');
 
-  // === JUPITER QUOTE (or Pump.fun fallback) ===
-  let entryPrice = token.price; // Default to Moralis price if quote fails
-  let tokensBought = amountUSD / entryPrice;
-  let success = true;
+  // === 3. TRY JUPITER QUOTE (best execution) ===
+  let entryPrice = token.price;        // fallback price
+  let tokensBought = amountUSD / token.price;
+  let usedJupiter = false;
 
   try {
-    const solPrice = 150; // Approx SOL USD
-    const solAmount = Math.max(Math.round((amountUSD / solPrice) * 1e9), 10000000);
-    const res = await axios.get('https://quote-api.jup.ag/v6/quote', {
-      params: { inputMint: 'So11111111111111111111111111111111111111112', outputMint: ca, amount: solAmount, slippageBps: 500 },
-      timeout: 8000
+    const solAmountLamports = Math.max(Math.round((amountUSD / 150) * 1e9), 10_000_000); // ~$150 SOL price approx
+    const quoteRes = await axios.get('https://quote-api.jup.ag/v6/quote', {
+      params: {
+        inputMint: 'So11111111111111111111111111111111111111112',
+        outputMint: ca,
+        amount: solAmountLamports,
+        slippageBps: 1000, // 10% slippage for fresh coins
+      },
+      timeout: 7000
     });
-    const quote = res.data;
-    if (quote.outAmount) {
-      entryPrice = amountUSD / (Number(quote.outAmount) / 1e9);
-      tokensBought = Number(quote.outAmount) / 1e9;
-    } else {
-      // FALLBACK: Direct Pump.fun buy if Jupiter has no route (works on bonding curve)
-      const pumpRes = await axios.post('https://frontend-api.pump.fun/transactions/swap', {
-        mint: ca,
-        amount: solAmount, // SOL in lamports
-        direction: 'buy',
-        slippage: 0.05 // 5%
-      }, { timeout: 10000 });
-      if (pumpRes.data.signature) {
-        entryPrice = pumpRes.data.price || token.price;
-        tokensBought = pumpRes.data.tokensReceived || (amountUSD / entryPrice);
-        console.log('Pump.fun fallback success:', pumpRes.data.signature);
-      } else {
-        success = false;
-      }
+
+    if (quoteRes.data?.outAmount) {
+      tokensBought = Number(quoteRes.data.outAmount) / 1e9;
+      entryPrice = amountUSD / tokensBought;
+      usedJupiter = true;
+      console.log(`Jupiter quote success → ${tokensBought.toFixed(2)} tokens @ $${entryPrice}`);
     }
   } catch (e) {
-    console.log('Jupiter/Pump fallback failed:', e.message);
-    success = false; // Use Moralis price as last resort
+    console.log('Jupiter quote failed (normal for fresh pump.fun coins):', e.message);
   }
 
-  if (!success) {
-  // All pump.fun coins have exactly 1,000,000,000 tokens total supply
-  const PUMP_FUN_SUPPLY = 1_000_000_000;
-
-  // Use the market cap we actually saw when user clicked buy
-  let currentMC = 9000; // fallback if everything is broken
-  if (token.mc && token.mc !== 'New') {
-    currentMC = parseFloat(token.mc.replace(/[^\d.]/g, '')) * (token.mc.includes('k') ? 1000 : 1000000);
+  // === 4. FINAL FALLBACK: USE MORALIS/BIRDEYE PRICE (100% accurate) ===
+  // This is the FIX — NEVER use rounded MC string again!
+  if (!usedJupiter) {
+    entryPrice = token.price;
+    tokensBought = amountUSD / token.price;
+    console.log(`Using API price fallback → $${entryPrice} per token`);
   }
 
-  // Force correct token amount and entry price
-  tokensBought = (amountUSD / currentMC) * PUMP_FUN_SUPPLY;
-  entryPrice   = currentMC / PUMP_FUN_SUPPLY;
-
-  console.log(`Jupiter failed → forced pump.fun math: MC $${currentMC} → ${tokensBought.toFixed(0)} tokens @ $${entryPrice}`);
-}
-
-  // Save to DB
+  // === 5. SAVE POSITION TO DB ===
   await new Promise(r => {
     db.run('BEGIN');
-    db.run(`INSERT INTO positions (user_id, ca, symbol, amount_usd, tokens_bought, entry_price, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [userId, ca, token.symbol, amountUSD, tokensBought, entryPrice, Date.now()]);
+    db.run(`
+      INSERT INTO positions (user_id, ca, symbol, amount_usd, tokens_bought, entry_price, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `, [userId, ca, token.symbol, amountUSD, tokensBought, entryPrice, Date.now()]);
+
     db.run('UPDATE users SET balance = balance - ? WHERE user_id = ?', [amountUSD, userId]);
     db.run('COMMIT', r);
   });
 
+  userLastActivity[userId] = Date.now();
+
+  // === 6. CONFIRMATION MESSAGE ===
   await ctx.editMessageText(esc(`
-BUY EXECUTED ✅
+BUY EXECUTED SUCCESSFULLY
 
 ${token.symbol}
 Size: $${amountUSD}
 Tokens: ${tokensBought.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
-Entry: $${entryPrice.toFixed(12)}
-MC: ${token.mc}
-Age: ${token.age}
-Liquidity: $${token.liquidity.toFixed(0)}
+Entry Price: $${entryPrice.toFixed(12)}
+Current MC: ${token.mc}
+Liquidity: $${Number(token.liquidity || 0).toFixed(0)}
 
 Cash left: $${(account.balance - amountUSD).toFixed(2)}
   `.trim()), {
     parse_mode: 'MarkdownV2',
-    reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "refresh_pos" }]] }
+    reply_markup: {
+      inline_keyboard: [[{ text: "Positions", callback_data: "refresh_pos" }]]
+    }
   });
 });
 
