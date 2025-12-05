@@ -9,6 +9,7 @@ const app = express();
 app.use(express.json());
 
 const db = new sqlite3.Database('crucible.db');
+async function showPositions(ctx) {
 
 // CRITICAL FOR RENDER: Add a persistent disk at /opt/render/project/src/crucible.db in Render dashboard
 db.exec('PRAGMA journal_mode = WAL;'); // Better concurrency
@@ -331,123 +332,44 @@ async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update.callback_query.from.id;
   const chatId = ctx.chat?.id || ctx.update.callback_query.message.chat.id;
 
-  // Reset 48h inactivity timer
   userLastActivity[userId] = Date.now();
 
   const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row)));
   if (!user) return ctx.reply('No active challenge');
 
   const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])));
-
-  let totalPnL = 0;
-  const buttons = [];
-
-  // === FAST PRICE FETCHING WITH CACHE ===
-  const liveData = await Promise.all(
-    positions.map(async (p) => {
-      const cached = priceCache.get(p.ca);
-      if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
-
-      const fresh = await getTokenData(p.ca);
-      priceCache.set(p.ca, { data: fresh, ts: Date.now() });
-      return fresh;
-    })
-  );
-
-  // === LOOP THROUGH POSITIONS & CALCULATE PnL
-  for (let i = 0; i < positions.length; i++) {
-    const p = positions[i];
-    const live = liveData[i] || { price: p.entry_price, symbol: p.symbol };
-
-    const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
-    const pnlPct = p.entry_price > 0 ? ((live.price - p.entry_price) / p.entry_price) * 100 : 0;
-
-    totalPnL += pnlUSD;
-
-    const row = [{
-      text: `${live.symbol || p.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% (${pnlUSD >= 0 ? '+' : ''}$${Math.abs(pnlUSD).toFixed(2)})`,
-      callback_data: 'noop'
-    }];
-
-    if (user.failed === 0) {
-      row.push({ text: '25%', callback_data: `sell_${p.id}_25` });
-      row.push({ text: '50%', callback_data: `sell_${p.id}_50` });
-      row.push({ text: '100%', callback_data: `sell_${p.id}_100` });
-    }
-    buttons.push(row);
+  if (positions.length === 0) {
+    return ctx.replyWithMarkdownV2('No open positions yet\\. Send a CA to buy\\!');
   }
 
-  // === PEAK EQUITY & TRAILING DRAWDOWN ===
-   const equity = user.balance + totalPnL;   // ← THIS LINE MUST EXIST
-
-  // === PEAK EQUITY & TRAILING DRAWDOWN (SAFE VERSION) ===
-  const MIN_PROFIT_TO_UPDATE_PEAK = 2.0; // don't raise floor on tiny pumps
-
-  let shouldUpdatePeak = false;
-  if (!user.peak_equity || user.peak_equity < user.start_balance) {
-    shouldUpdatePeak = true;
-  } else if (equity > user.peak_equity + MIN_PROFIT_TO_UPDATE_PEAK) {
-    shouldUpdatePeak = true;
+  // Kill old auto-refresh if exists
+  if (ACTIVE_POSITION_PANELS.has(userId)) {
+    clearInterval(ACTIVE_POSITION_PANELS.get(userId).intervalId);
   }
 
-  if (shouldUpdatePeak) {
-    await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [equity, userId], r));
+  let messageId;
+  if (ctx.update?.callback_query?.message?.message_id) {
+    messageId = ctx.update.callback_query.message.message_id;
+  } else {
+    const sent = await ctx.replyWithMarkdownV2('Loading live positions\\.\.\.', {
+      reply_markup: { inline_keyboard: [[{ text: 'Close', callback_data: 'close_pos' }]] }
+    });
+    messageId = sent.message_id;
   }
 
-  const peak = user.peak_equity || user.start_balance;
-  const drawdown = equity < peak ? ((peak - equity) / peak) * 100 : 0;
-  const floor = peak * (1 - DRAWDOWN_MAX / 100);
+  // First render
+  await renderPanel(userId, chatId, messageId);
 
-  // === AUTO FAIL ===
-  if (user.failed === 0 && equity < floor) {
-    await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
-  }
+  // Auto-update every 2.2 seconds
+  const intervalId = setInterval(() => {
+    renderPanel(userId, chatId, messageId).catch(() => {
+      clearInterval(intervalId);
+      ACTIVE_POSITION_PANELS.delete(userId);
+    });
+  }, 2200);
 
-  // === AUTO PASS ===
-  let justPassed = false;
-  if (user.failed === 0 && equity >= user.target) {
-    await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
-    justPassed = true;
-  }
-
-  // === STATUS MESSAGE ===
-  let status = '';
-  if (user.failed === 1) status = '*CHALLENGE FAILED* — 17% drawdown breached\n\n';
-  if (user.failed === 2) status = '*CHALLENGE PASSED!* You earned the bounty!\n\n';
-  if (user.failed === 3) status = '*FAILED* — 48h inactivity\n\n';
-
-  const text = esc(`
-${status}*LIVE POSITIONS (${positions.length})*
-
-Equity: $${equity.toFixed(2)}
-Unrealized PnL: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
-Drawdown: ${drawdown.toFixed(2)}% (from peak $${peak.toFixed(0)})
-  `.trim());
-
-  const keyboard = {
-    inline_keyboard: [
-      ...buttons,
-      [{ text: 'Refresh', callback_data: 'refresh_pos' }],
-      [{ text: 'Close Panel', callback_data: 'close_pos' }]
-    ]
-  };
-
-  // === SEND OR EDIT MESSAGE ===
-  try {
-    if (positionsMessageId[userId] && ctx.update?.callback_query) {
-      await ctx.telegram.editMessageText(chatId, positionsMessageId[userId], null, text, {
-        parse_mode: 'MarkdownV2',
-        reply_markup: keyboard
-      });
-    } else {
-      const sent = await ctx.replyWithMarkdownV2(text, { reply_markup: keyboard });
-      positionsMessageId[userId] = sent.message_id;
-    }
-  } catch (e) {
-    const sent = await ctx.replyWithMarkdownV2(text, { reply_markup: keyboard });
-    positionsMessageId[userId] = sent.message_id;
-  }
-
+  ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
+}
   // === AUTO CONGRATS MESSAGE ON PASS (only once) ===
   if (justPassed) {
     await ctx.replyWithMarkdownV2(esc(`
@@ -464,8 +386,86 @@ Thank you for trading with Crucible
   }
 }
 
-bot.action('refresh_pos', async ctx => { await ctx.answerCbQuery(); await showPositions(ctx); });
-bot.action('close_pos', async ctx => { await ctx.answerCbQuery(); await ctx.deleteMessage(); delete positionsMessageId[ctx.from.id]; });
+async function renderPanel(userId, chatId, messageId) {
+  const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row)));
+  if (!user) return;
+
+  const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])));
+
+  let totalPnL = 0;
+  const buttons = [];
+
+  const liveData = await Promise.all(positions.map(p => getTokenData(p.ca)));
+
+  for (let i = 0; i < positions.length; i++) {
+    const p = positions[i];
+    const live = liveData[i] || { price: p.entry_price, symbol: p.symbol };
+
+    const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
+    const pnlPct = p.entry_price > 0 ? ((live.price - p.entry_price) / p.entry_price) * 100 : 0;
+    totalPnL += pnlUSD;
+
+    buttons.push([
+      { text: `${live.symbol || p.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% (${pnlUSD >= 0 ? '+' : ''}$${Math.abs(pnlUSD).toFixed(2)})`, callback_data: 'noop' },
+      ...(user.failed === 0 ? [
+        { text: '25%', callback_data: `sell_${p.id}_25` },
+        { text: '50%', callback_data: `sell_${p.id}_50` },
+        { text: '100%', callback_data: `sell_${p.id}_100` }
+      ] : [])
+    ]);
+  }
+
+  const equity = user.balance + totalPnL;
+
+  let peak = user.peak_equity || user.start_balance;
+  if (!user.peak_equity || equity > peak + 2) {
+    peak = equity;
+    await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [equity, userId], r));
+  }
+
+  const drawdown = equity < peak ? ((peak - equity) / peak) * 100 : 0;
+
+  // Auto-fail / auto-pass
+  if (user.failed === 0 && equity < peak * (1 - DRAWDOWN_MAX / 100)) {
+    await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
+  }
+  if (user.failed === 0 && equity >= user.target) {
+    await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
+  }
+
+  const status = user.failed === 1 ? '*CHALLENGE FAILED — 17% DD*\n\n' :
+                 user.failed === 2 ? '*CHALLENGE PASSED!*\n\n' :
+                 user.failed === 3 ? '*FAILED — Inactivity*\n\n' : '';
+
+  const text = esc(`
+${status}*LIVE POSITIONS* (auto-updating)
+
+Equity: $${equity.toFixed(2)}
+Unrealized PnL: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
+Drawdown: ${drawdown.toFixed(2)}% ${drawdown > 15 ? '⚠️' : ''}
+`.trim());
+
+  await bot.telegram.editMessageText(chatId, messageId, null, text, {
+    parse_mode: 'MarkdownV2',
+    reply_markup: {
+      inline_keyboard: [
+        ...buttons,
+        [{ text: 'Refresh', callback_data: 'refresh_pos' }],
+        [{ text: 'Close Panel', callback_data: 'close_pos' }]
+      ]
+    }
+  });
+}
+
+bot.action('close_pos', async ctx => {
+  await ctx.answerCbQuery();
+  const userId = ctx.from.id;
+  if (ACTIVE_POSITION_PANELS.has(userId)) {
+    clearInterval(ACTIVE_POSITION_PANELS.get(userId).intervalId);
+    ACTIVE_POSITION_PANELS.delete(userId);
+  }
+  await ctx.deleteMessage();
+});
 
 // SELL
 bot.action(/sell_(\d+)_(\d+)/, async ctx => {
