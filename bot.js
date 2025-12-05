@@ -187,20 +187,43 @@ userLastActivity[userId] = Date.now();
 });
 
 // ADMIN TEST
+// ADMIN TEST — FIXED & WORKING AGAIN
 bot.command('admin_test', async ctx => {
   if (ctx.from.id !== ADMIN_ID) return;
+
   const pay = Number(ctx.message.text.split(' ')[1]);
-  if (![20,30,40,50].includes(pay)) return ctx.reply('Usage: /admin_test 20|30|40|50');
+  if (![20, 30, 40, 50].includes(pay)) {
+    return ctx.reply('Usage: /admin_test 20|30|40|50');
+  }
+
   const tier = TIERS[pay];
 
+  // Reset everything for this user
   await new Promise(r => db.run(
-    `INSERT OR REPLACE INTO users (user_id, paid, balance, start_balance, target, bounty, failed)
-     VALUES (?, 1, ?, ?, ?, ?, 0)`,
-    [ctx.from.id, tier.balance, tier.balance, tier.target, tier.bounty], r
+    `INSERT OR REPLACE INTO users 
+     (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity)
+     VALUES (?, 1, ?, ?, ?, ?, 0, ?)`,
+    [ctx.from.id, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance], r
   ));
 
-  ctx.replyWithMarkdownV2(esc(`ADMIN TEST READY\n$${pay} → $${tier.balance}`), {
-    reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "refresh_pos" }]] }
+  // Clean any old auto-refresh panel
+  if (ACTIVE_POSITION_PANELS.has(ctx.from.id)) {
+    clearInterval(ACTIVE_POSITION_PANELS.get(ctx.from.id).intervalId);
+    ACTIVE_POSITION_PANELS.delete(ctx.from.id);
+  }
+
+  ctx.replyWithMarkdownV2(esc(`
+ADMIN TEST ACCOUNT READY
+
+Tier: $${pay} → $${tier.balance}
+Target: $${tier.target}
+Bounty: $${tier.bounty}
+
+Send any Solana CA to start trading\\.  
+Click below to open live positions panel\\.`.trim()), {
+    reply_markup: {
+      inline_keyboard: [[{ text: "Open Positions", callback_data: "refresh_pos" }]]
+    }
   });
 });
 
