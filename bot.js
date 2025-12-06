@@ -188,24 +188,26 @@ Good luck trader
 `.trim())));
 
 // CREATE FUNDED WALLET
+// CREATE FUNDED WALLET — FIXED 100%
 app.post('/create-funded-wallet', async (req, res) => {
-  const { userId, payAmount, referralCode } = req.body;
-  const tier = TIERS[payAmount];
-  if (!tier) return res.status(400).json({ok: false});
+  try {
+    const { userId, payAmount, referralCode } = req.body;
+    const tier = TIERS[payAmount];
+    if (!tier) return res.status(400).json({ok: false});
 
-  let commissionPaid = false;
-  if (referralCode) {
-    const influencer = await new Promise(r => db.get('SELECT influencer_id FROM influencers WHERE referral_code = ?', [referralCode], (_, row) => r(row)));
-    if (influencer && influencer.influencer_id) {
-      const alreadyReferred = await new Promise(r => db.get('SELECT 1 FROM referrals WHERE influencer_id = ? AND user_id = ?', [influencer.influencer_id, userId], (_, row) => r(row)));
-      if (!alreadyReferred) {
-        const commission = payAmount * 0.20; // 20% one-time
-        await new Promise(r => db.run('UPDATE influencers SET total_earnings = total_earnings + ? WHERE influencer_id = ?', [commission, influencer.influencer_id], r));
-        await new Promise(r => db.run('INSERT INTO referrals (influencer_id, user_id, pay_amount, date) VALUES (?, ?, ?, ?)', [influencer.influencer_id, userId, payAmount, Date.now()], r));
-        commissionPaid = true;
+    let commissionPaid = false;
+    if (referralCode) {
+      const influencer = await new Promise(r => db.get('SELECT influencer_id FROM influencers WHERE referral_code = ?', [referralCode], (_, row) => r(row)));
+      if (influencer && influencer.influencer_id) {
+        const alreadyReferred = await new Promise(r => db.get('SELECT 1 FROM referrals WHERE influencer_id = ? AND user_id = ?', [influencer.influencer_id, userId], (_, row) => r(row)));
+        if (!alreadyReferred) {
+          const commission = payAmount * 0.20;
+          await new Promise(r => db.run('UPDATE influencers SET total_earnings = total_earnings + ? WHERE influencer_id = ?', [commission, influencer.influencer_id], r));
+          await new Promise(r => db.run('INSERT INTO referrals (influencer_id, user_id, pay_amount, date) VALUES (?, ?, ?, ?)', [influencer.influencer_id, userId, payAmount, Date.now()], r));
+          commissionPaid = true;
+        }
       }
     }
-  }
 
     await new Promise(r => db.run(
       `INSERT OR REPLACE INTO users (user_id, paid, balance, start_balance, target, bounty, failed)
@@ -226,15 +228,15 @@ Paste any Solana CA to buy
       parse_mode: 'MarkdownV2',
       reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "refresh_pos" }]] }
     });
-userLastActivity[userId] = Date.now();
-    res.json({ok: true});
+
+    userLastActivity[userId] = Date.now();
     res.json({ok: true, commission: commissionPaid});
+
   } catch (e) {
     console.error(e);
     res.status(500).json({ok: false});
   }
 });
-
 // ADMIN TEST — FINAL VERSION (TESTED LIVE, NO MORE ERRORS)
 bot.command('admin_test', async ctx => {
   if (ctx.from.id !== ADMIN_ID) return;
