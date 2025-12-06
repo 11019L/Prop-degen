@@ -121,15 +121,26 @@ async function getTokenData(ca) {
 
 // START
 bot.start(ctx => {
-  ctx.replyWithMarkdownV2(esc(`*Crucible Prop Firm*\n\nJoin: ${CHANNEL_LINK}`), {
+  ctx.replyWithMarkdownV2(esc(`
+*CRUCIBLE ---- SOLANA PROP FIRM*
+
+purchase an account and start high leveraging\\.
+Ready to test your discipline?\\.  
+Only the weak will fail\\.
+
+No KYC\\.  
+No bullshit\\.  
+only second chances\\.
+
+You either pass — or you evolve\\.
+
+Live sniping channel: @Crucibleprop
+
+Still breathing?`.trim()), {
     reply_markup: {
       inline_keyboard: [
-        [{ text: "Join", url: CHANNEL_LINK }],
-        [{ text: "$20 → $200", web_app: { url: process.env.MINI_APP_URL + '?tier=20' } }],
-        [{ text: "$30 → $300", web_app: { url: process.env.MINI_APP_URL + '?tier=30' } }],
-        [{ text: "$40 → $400", web_app: { url: process.env.MINI_APP_URL + '?tier=40' } }],
-        [{ text: "$50 → $500", web_app: { url: process.env.MINI_APP_URL + '?tier=50' } }],
-        [{ text: "Rules", callback_data: "rules" }]
+        [{ text: "Join Winners Only", url: "https://t.me/Crucibleprop" }],
+        [{ text: "SURVIVE OR DIE", web_app: { url: process.env.MINI_APP_URL } }]
       ]
     }
   });
@@ -210,6 +221,11 @@ bot.command('admin_test', async ctx => {
     clearInterval(ACTIVE_POSITION_PANELS.get(ctx.from.id).intervalId);
     ACTIVE_POSITION_PANELS.delete(ctx.from.id);
   }
+  
+  await ctx.replyWithMarkdownV2(
+  `*ACCOUNT READY*\n\nUse /positions anytime to open the live panel`,
+  { reply_markup: { inline_keyboard: [[{ text: "Open Positions", callback_data: "refresh_pos" }]] } }
+);
 
   // PERFECTLY SAFE TEXT — NO DOTS AT THE END, NO UNESCAPED CHARACTERS
   await ctx.replyWithMarkdownV2(
@@ -225,6 +241,15 @@ bot.command('admin_test', async ctx => {
     }
   );
 });
+// Re-open positions panel anytime with /positions or button
+bot.command('positions', async (ctx) => {
+  if (ctx.from.id !== ADMIN_ID && !await new Promise(r => db.get('SELECT 1 FROM users WHERE user_id = ? AND paid = 1', [ctx.from.id], (_, row) => r(row)))) {
+    return ctx.reply('No active challenge');
+  }
+  await showPositions(ctx);
+});
+
+bot.hears('/positions', async (ctx) => await showPositions(ctx));
 
 // BUY FLOW
 async function handleBuy(ctx, ca) {
@@ -332,6 +357,12 @@ Balance left: $${(account.balance - amountUSD).toFixed(2)}
     parse_mode: 'MarkdownV2',
     reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "refresh_pos" }]] }
   });
+  reply_markup: {
+  inline_keyboard: [
+    [{ text: "Open Live Positions", callback_data: "refresh_pos" }],
+    [{ text: "Refresh anytime: /positions", callback_data: "noop" }]
+  ]
+}
 });
 
 // CUSTOM AMOUNT
