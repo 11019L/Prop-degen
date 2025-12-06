@@ -121,30 +121,30 @@ async function getTokenData(ca) {
 
 // START
 bot.start(ctx => {
-  ctx.replyWithMarkdownV2(esc(`
-*CRUCIBLE — SOLANA PROP FIRM*
-
-Purchase an account and start high leveraging\\.
-Ready to test your discipline?\\.
-Only the weak will fail\\.
-
-No KYC\\.
-No bullshit\\.
-only second chances\\.
-
-You either pass — or you evolve\\.
-
-Live sniping channel: @Crucibleprop
-
-Still breathing?`.trim()), {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: "Join Winners Only", url: "https://t.me/Crucibleprop" }],
-        [{ text: "SURVIVE OR DIE", web_app: { url: process.env.MINI_APP_URL } }]
-      ]
+  ctx.replyWithMarkdownV2(
+    // All periods are escaped as \\.
+    // Using string concatenation to be 100% safe
+    "*CRUCIBLE — SOLANA PROP FIRM*\n\n" +
+    "Purchase an account and start high leveraging\\.\n" +
+    "Ready to test your discipline?\\.\n" +
+    "Only the weak will fail\\.\n\n" +
+    "No KYC\\.\n" +
+    "No bullshit\\.\n" +
+    "No second chances\\.\n\n" +
+    "You either pass — or you evolve\\.\n\n" +
+    "Live sniping channel: @Crucibleprop\n\n" +
+    "Still breathing?",
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "Join Winners Only", url: "https://t.me/Crucibleprop" }],
+          [{ text: "SURVIVE OR DIE", web_app: { url: process.env.MINI_APP_URL } }]
+        ]
+      }
     }
-  });
+  );
 });
+
 bot.action('rules', ctx => ctx.replyWithMarkdownV2(esc(`
 *CRUCIBLE CHALLENGE RULES*
 
