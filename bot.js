@@ -336,96 +336,31 @@ bot.command('adminstats', async ctx => {
   ctx.replyWithMarkdownV2(esc(msg));
 });
 
-// =============================================
-// 1. FREE $200 ACCOUNT — Admin only
-// =============================================
-bot.command('free200', async ctx => {
-  if (ctx.from.id !== ADMIN_ID) return ctx.reply('Unauthorized');
+bot.start(async (ctx) => {
+  if (ctx.startPayload === 'free200') {
+    const userId = ctx.from.id;
 
-  const args = ctx.message.text.trim().split(' ');
-  if (args.length < 2) return ctx.reply('Usage: /free200 USER_ID');
+    const tier = { balance: 200, target: 460, bounty: 140 };
+    await new Promise(r => db.run(`
+      INSERT OR REPLACE INTO users 
+      (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity)
+      VALUES (?, 1, ?, ?, ?, ?, 0, ?)
+    `, [userId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance], r));
 
-  const targetUserId = Number(args[1]);
-  if (isNaN(targetUserId)) return ctx.reply('Invalid user ID');
-
-  // Give $200 account instantly
-  const tier = { balance: 200, target: 460, bounty: 140 };
-  await new Promise(r => db.run(`
-    INSERT OR REPLACE INTO users 
-    (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity)
-    VALUES (?, 1, ?, ?, ?, ?, 0, ?)
-  `, [targetUserId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance], r));
-
-  // Optional: clear old positions
-  await new Promise(r => db.run('DELETE FROM positions WHERE user_id = ?', [targetUserId], r));
-
-  // Send message to user
-  await bot.telegram.sendMessage(targetUserId, esc(`
+    return ctx.replyWithMarkdownV2(esc(`
 *FREE $200 ACCOUNT ACTIVATED*
 
-Capital: $${tier.balance}
-Target: $${tier.target}
-Max DD: 17%
-
-Paste any Solana CA to start trading\\.
-  `.trim()), {
-    parse_mode: 'MarkdownV2',
-    reply_markup: { inline_keyboard: [[{ text: "Open Live Positions", callback_data: "refresh_pos" }]] }
-  });
-
-  ctx.reply(`Free $200 account given to user ${targetUserId}`);
-});
-// =============================================
-// 2. FREE ACCOUNT LINK (optional — one-time use)
-// =============================================
-app.get('/go', async (req, res) => {
-  const userId = Number(req.query.id);
-  if (!userId) return res.send('Invalid link');
-
-  // Optional: add one-time token check here for extra security
-
-  const tier = { balance: 200, target: 460, bounty: 140 };
-  await new Promise(r => db.run(`
-    INSERT OR REPLACE INTO users 
-    (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity)
-    VALUES (?, 1, ?, ?, ?, ?, 0, ?)
-  `, [userId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance], r));
-
-  await bot.telegram.sendMessage(userId, esc(`
-*FREE $200 ACCOUNT ACTIVATED*
-
-You received a free challenge\\!
-
-Capital: $${tier.balance}
-Target: $${tier.target}
+Capital: $200
+Target: $460
 Max DD: 17%
 
 Start trading now\\.`.trim()), {
-    parse_mode: 'MarkdownV2',
-    reply_markup: { inline_keyboard: [[{ text: "Open Positions", callback_data: "refresh_pos" }]] }
-  });
+      reply_markup: { inline_keyboard: [[{ text: "Open Live Positions", callback_data: "refresh_pos" }]] }
+    });
+  }
 
-  res.send('<h1>Account Activated! Check your bot.</h1>');
-});
-// =============================================
-// 3. Generate free account link (admin command)
-// =============================================
-bot.command('freelink', async ctx => {
-  if (ctx.from.id !== ADMIN_ID) return;
-
-  const args = ctx.message.text.trim().split(' ');
-  if (args.length < 2) return ctx.reply('Usage: /freelink USER_ID');
-
-  const userId = args[1];
-  const link = `https://your-bot.onrender.com/go?id=${userId}`;
-
-  ctx.replyWithMarkdownV2(esc(`
-Free $200 Account Link
-
-Valid once\\.
-
-${link}
-  `.trim()));
+  // Your normal welcome message here
+  ctx.replyWithMarkdownV2("your normal /start message...", { /* ... */ });
 });
 
 // Re-open positions panel anytime with /positions or button
