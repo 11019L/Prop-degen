@@ -141,15 +141,47 @@ bot.command('generate_code', async ctx => {
 
 
 // START
+// FIXED /START — Handles normal welcome + free accounts
 bot.start(async ctx => {
   const referralCode = ctx.startPayload; // From t.me/bot?start=CODE
+
+  // === FREE ACCOUNT MAGIC ===
+  if (referralCode === 'free200') {
+    const userId = ctx.from.id;
+    const tier = { balance: 200, target: 460, bounty: 140 };
+
+    // Give account instantly (safe if already exists)
+    await new Promise(r => db.run(`
+      INSERT OR REPLACE INTO users 
+      (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity)
+      VALUES (?, 1, ?, ?, ?, ?, 0, ?)
+    `, [userId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance], r));
+
+    // Clear old positions if any
+    await new Promise(r => db.run('DELETE FROM positions WHERE user_id = ?', [userId], r));
+
+    // Send success message
+    return ctx.replyWithMarkdownV2(esc(`
+*FREE $200 ACCOUNT ACTIVATED*
+
+Capital: $${tier.balance}
+Target: $${tier.target}
+Max DD: 17%
+
+Paste any Solana CA to start trading\\.
+    `.trim()), {
+      reply_markup: { inline_keyboard: [[{ text: "Open Live Positions", callback_data: "refresh_pos" }]] }
+    });
+  }
+
+  // === NORMAL REFERRAL HANDLING ===
   let influencerId = null;
-  if (referralCode) {
+  if (referralCode && referralCode !== 'free200') {
     influencerId = await new Promise(r => db.get('SELECT influencer_id FROM influencers WHERE referral_code = ?', [referralCode], (_, row) => r(row?.influencer_id)));
   }
+
+  // === YOUR NORMAL WELCOME MESSAGE ===
   ctx.replyWithMarkdownV2(
-    // All periods are escaped as \\.
-    // Using string concatenation to be 100% safe
     "*CRUCIBLE — SOLANA PROP FIRM*\n\n" +
     "Purchase an account and start high leveraging\\.\n" +
     "Ready to test your discipline?\\.\n" +
