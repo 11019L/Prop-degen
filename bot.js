@@ -17,6 +17,7 @@ db.exec('PRAGMA journal_mode = WAL;'); // Better concurrency
 const ADMIN_ID = Number(process.env.ADMIN_ID);
 const ACTIVE_POSITION_PANELS = new Map();
 const CHANNEL_LINK = "https://t.me/Crucibleprop";
+const INFLUENCER_COMMISSION = 0.2; // 20%
 
 // ONLY ONE MESSAGE ID SYSTEM — FIXED
 const positionsMessageId = {};           // userId → message_id (this is the one we use)
@@ -37,8 +38,13 @@ db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, paid INTEGER DEFAULT 0, balance REAL, start_balance REAL, target REAL, bounty REAL, failed INTEGER DEFAULT 0)`);
   db.run(`CREATE TABLE IF NOT EXISTS positions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, ca TEXT, symbol TEXT, amount_usd REAL, tokens_bought REAL, entry_price REAL, created_at INTEGER)`);
 });
+db.run(`ALTER TABLE users ADD COLUMN peak_equity REAL`, () => {}); // safe if already exists
 
 const esc = str => String(str).replace(/[_*[\]()~>#+-=|{}.!]/g, '\\$&');
+
+const safeAnswer = async (ctx, text = '') => {
+  try { await ctx.answerCbQuery(text); } catch {}
+};
 
 function formatMC(marketCap) {
   if (!marketCap || marketCap < 1000) return "New";
@@ -119,8 +125,28 @@ async function getTokenData(ca) {
   };
 }
 
+// =============================================
+// 1. INFLUENCER SYSTEM — 20% ONE-TIME ONLY
+// =============================================
+db.run(`CREATE TABLE IF NOT EXISTS influencers (influencer_id INTEGER PRIMARY KEY, referral_code TEXT UNIQUE, total_earnings REAL DEFAULT 0)`);
+db.run(`CREATE TABLE IF NOT EXISTS referrals (id INTEGER PRIMARY KEY AUTOINCREMENT, influencer_id INTEGER, user_id INTEGER, pay_amount REAL, date INTEGER)`);
+
+// Generate referral code
+bot.command('generate_code', async ctx => {
+  if (ctx.from.id !== ADMIN_ID) return ctx.reply('Only admin can generate codes');
+  const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+  await new Promise(r => db.run('INSERT OR REPLACE INTO influencers (influencer_id, referral_code) VALUES (?, ?)', [ctx.from.id, code], r));
+  ctx.replyWithMarkdownV2(esc(`New influencer code: \`${code}\`\nLink: t.me/${ctx.botInfo.username}?start=${code}`));
+});
+
+
 // START
-bot.start(ctx => {
+bot.start(async ctx => {
+  const referralCode = ctx.startPayload; // From t.me/bot?start=CODE
+  let influencerId = null;
+  if (referralCode) {
+    influencerId = await new Promise(r => db.get('SELECT influencer_id FROM influencers WHERE referral_code = ?', [referralCode], (_, row) => r(row?.influencer_id)));
+  }
   ctx.replyWithMarkdownV2(
     // All periods are escaped as \\.
     // Using string concatenation to be 100% safe
@@ -163,10 +189,23 @@ Good luck trader
 
 // CREATE FUNDED WALLET
 app.post('/create-funded-wallet', async (req, res) => {
-  try {
-    const { userId, payAmount } = req.body;
-    const tier = TIERS[payAmount];
-    if (!tier) return res.status(400).json({ok: false});
+  const { userId, payAmount, referralCode } = req.body;
+  const tier = TIERS[payAmount];
+  if (!tier) return res.status(400).json({ok: false});
+
+  let commissionPaid = false;
+  if (referralCode) {
+    const influencer = await new Promise(r => db.get('SELECT influencer_id FROM influencers WHERE referral_code = ?', [referralCode], (_, row) => r(row)));
+    if (influencer && influencer.influencer_id) {
+      const alreadyReferred = await new Promise(r => db.get('SELECT 1 FROM referrals WHERE influencer_id = ? AND user_id = ?', [influencer.influencer_id, userId], (_, row) => r(row)));
+      if (!alreadyReferred) {
+        const commission = payAmount * 0.20; // 20% one-time
+        await new Promise(r => db.run('UPDATE influencers SET total_earnings = total_earnings + ? WHERE influencer_id = ?', [commission, influencer.influencer_id], r));
+        await new Promise(r => db.run('INSERT INTO referrals (influencer_id, user_id, pay_amount, date) VALUES (?, ?, ?, ?)', [influencer.influencer_id, userId, payAmount, Date.now()], r));
+        commissionPaid = true;
+      }
+    }
+  }
 
     await new Promise(r => db.run(
       `INSERT OR REPLACE INTO users (user_id, paid, balance, start_balance, target, bounty, failed)
@@ -189,6 +228,7 @@ Paste any Solana CA to buy
     });
 userLastActivity[userId] = Date.now();
     res.json({ok: true});
+    res.json({ok: true, commission: commissionPaid});
   } catch (e) {
     console.error(e);
     res.status(500).json({ok: false});
@@ -240,6 +280,152 @@ bot.command('admin_test', async ctx => {
     }
   );
 });
+
+// =============================================
+// 2. INFLUENCER DASHBOARD — Shows 20% one-time earnings
+// =============================================
+bot.command('influencer', async ctx => {
+  const influencerId = ctx.from.id;
+  const info = await new Promise(r => db.get('SELECT referral_code, total_earnings FROM influencers WHERE influencer_id = ?', [influencerId], (_, row) => r(row)));
+  if (!info) return ctx.reply('Not an influencer. Ask admin for code.');
+
+  const totalReferred = await new Promise(r => db.get('SELECT COUNT(*) as c FROM referrals WHERE influencer_id = ?', [influencerId], (_, row) => r(row?.c || 0)));
+
+  const recent = await new Promise(r => db.all(`
+    SELECT DATE(datetime(date/1000,'unixepoch')) as d, COUNT(*) as users, SUM(pay_amount)*0.2 as earned
+    FROM referrals WHERE influencer_id = ?
+    GROUP BY d ORDER BY d DESC LIMIT 7
+  `, [influencerId], (_, rows) => r(rows || [])));
+
+  let msg = `*INFLUENCER DASHBOARD*\n\n`;
+  msg += `Code: \`${info.referral_code}\`\n`;
+  msg += `Total Earnings: $${info.total_earnings.toFixed(2)}\n`;
+  msg += `Users Referred: ${totalReferred}\n`;
+  msg += `Commission: 20% one-time\n\n`;
+  msg += `Link: t.me/${ctx.botInfo.username}?start=${info.referral_code}\n\n`;
+
+  if (recent.length) {
+    msg += `*Last 7 Days*\n`;
+    for (const r of recent) msg += `${r.d}: $${r.earned.toFixed(2)} (${r.users} users)\n`;
+  }
+
+  ctx.replyWithMarkdownV2(esc(msg));
+});
+
+// =============================================
+// 3. ADMIN STATS — Full business overview
+// =============================================
+bot.command('adminstats', async ctx => {
+  if (ctx.from.id !== ADMIN_ID) return;
+
+  const totalRevenue = await new Promise(r => db.get('SELECT SUM(start_balance) as r FROM users WHERE paid = 1', (_, row) => r(row?.r || 0)));
+  const todayRevenue = await new Promise(r => db.get('SELECT SUM(start_balance) as r FROM users WHERE paid = 1 AND DATE(datetime(created_at/1000,"unixepoch")) = date("now")', (_, row) => r(row?.r || 0)));
+  const totalUsers = await new Promise(r => db.get('SELECT COUNT(*) as c FROM users WHERE paid = 1', (_, row) => r(row?.c || 0)));
+  const active = await new Promise(r => db.get('SELECT COUNT(*) as c FROM users WHERE paid = 1 AND failed = 0', (_, row) => r(row?.c || 0)));
+  const passed = await new Promise(r => db.get('SELECT COUNT(*) as c FROM users WHERE failed = 2', (_, row) => r(row?.c || 0)));
+
+  let msg = `*CRUCIBLE ADMIN STATS*\n\n`;
+  msg += `Total Revenue: $${totalRevenue.toFixed(2)}\n`;
+  msg += `Today's Revenue: $${todayRevenue.toFixed(2)}\n`;
+  msg += `Total Paid Users: ${totalUsers}\n`;
+  msg += `Active Trading: ${active}\n`;
+  msg += `Passed Challenges: ${passed}\n`;
+
+  ctx.replyWithMarkdownV2(esc(msg));
+});
+
+// =============================================
+// 1. FREE $200 ACCOUNT — Admin only
+// =============================================
+bot.command('free200', async ctx => {
+  if (ctx.from.id !== ADMIN_ID) return ctx.reply('Unauthorized');
+
+  const args = ctx.message.text.trim().split(' ');
+  if (args.length < 2) return ctx.reply('Usage: /free200 USER_ID');
+
+  const targetUserId = Number(args[1]);
+  if (isNaN(targetUserId)) return ctx.reply('Invalid user ID');
+
+  // Give $200 account instantly
+  const tier = { balance: 200, target: 460, bounty: 140 };
+  await new Promise(r => db.run(`
+    INSERT OR REPLACE INTO users 
+    (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity)
+    VALUES (?, 1, ?, ?, ?, ?, 0, ?)
+  `, [targetUserId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance], r));
+
+  // Optional: clear old positions
+  await new Promise(r => db.run('DELETE FROM positions WHERE user_id = ?', [targetUserId], r));
+
+  // Send message to user
+  await bot.telegram.sendMessage(targetUserId, esc(`
+*FREE $200 ACCOUNT ACTIVATED*
+
+Capital: $${tier.balance}
+Target: $${tier.target}
+Max DD: 17%
+
+Paste any Solana CA to start trading\\.
+  `.trim()), {
+    parse_mode: 'MarkdownV2',
+    reply_markup: { inline_keyboard: [[{ text: "Open Live Positions", callback_data: "refresh_pos" }]] }
+  });
+
+  ctx.reply(`Free $200 account given to user ${targetUserId}`);
+});
+// =============================================
+// 2. FREE ACCOUNT LINK (optional — one-time use)
+// =============================================
+app.get('/go', async (req, res) => {
+  const userId = Number(req.query.id);
+  if (!userId) return res.send('Invalid link');
+
+  // Optional: add one-time token check here for extra security
+
+  const tier = { balance: 200, target: 460, bounty: 140 };
+  await new Promise(r => db.run(`
+    INSERT OR REPLACE INTO users 
+    (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity)
+    VALUES (?, 1, ?, ?, ?, ?, 0, ?)
+  `, [userId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance], r));
+
+  await bot.telegram.sendMessage(userId, esc(`
+*FREE $200 ACCOUNT ACTIVATED*
+
+You received a free challenge\\!
+
+Capital: $${tier.balance}
+Target: $${tier.target}
+Max DD: 17%
+
+Start trading now\\.`.trim()), {
+    parse_mode: 'MarkdownV2',
+    reply_markup: { inline_keyboard: [[{ text: "Open Positions", callback_data: "refresh_pos" }]] }
+  });
+
+  res.send('<h1>Account Activated! Check your bot.</h1>');
+});
+// =============================================
+// 3. Generate free account link (admin command)
+// =============================================
+bot.command('freelink', async ctx => {
+  if (ctx.from.id !== ADMIN_ID) return;
+
+  const args = ctx.message.text.trim().split(' ');
+  if (args.length < 2) return ctx.reply('Usage: /freelink USER_ID');
+
+  const userId = args[1];
+  const link = `https://your-bot.onrender.com/go?id=${userId}`;
+
+  ctx.replyWithMarkdownV2(esc(`
+Free $200 Account Link
+
+Valid once\\.
+
+${link}
+  `.trim()));
+});
+
 // Re-open positions panel anytime with /positions or button
 bot.command('positions', async (ctx) => {
   if (ctx.from.id !== ADMIN_ID && !await new Promise(r => db.get('SELECT 1 FROM users WHERE user_id = ? AND paid = 1', [ctx.from.id], (_, row) => r(row)))) {
@@ -356,12 +542,6 @@ Balance left: $${(account.balance - amountUSD).toFixed(2)}
     parse_mode: 'MarkdownV2',
     reply_markup: { inline_keyboard: [[{ text: "Positions", callback_data: "refresh_pos" }]] }
   });
-  reply_markup: {
-  inline_keyboard: [
-    [{ text: "Open Live Positions", callback_data: "refresh_pos" }],
-    [{ text: "Refresh anytime: /positions", callback_data: "noop" }]
-  ]
-}
 });
 
 // CUSTOM AMOUNT
