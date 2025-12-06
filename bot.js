@@ -140,56 +140,50 @@ bot.command('generate_code', async ctx => {
 });
 
 
-// START
-// FIXED /START — Handles normal welcome + free accounts
+// FINAL FIXED /START — Free accounts + referrals + normal start
 bot.start(async ctx => {
-  const referralCode = ctx.startPayload; // From t.me/bot?start=CODE
+  const payload = ctx.startPayload || ''; // '' if no payload
 
-  // === FREE ACCOUNT MAGIC ===
-  if (referralCode === 'free200') {
+  // FREE $200 ACCOUNT LINK
+  if (payload === 'free200') {
     const userId = ctx.from.id;
     const tier = { balance: 200, target: 460, bounty: 140 };
 
-    // Give account instantly (safe if already exists)
     await new Promise(r => db.run(`
       INSERT OR REPLACE INTO users 
       (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity)
       VALUES (?, 1, ?, ?, ?, ?, 0, ?)
     `, [userId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance], r));
 
-    // Clear old positions if any
     await new Promise(r => db.run('DELETE FROM positions WHERE user_id = ?', [userId], r));
 
-    // Send success message
-    return ctx.replyWithMarkdownV2(esc(`
-*FREE $200 ACCOUNT ACTIVATED*
-
-Capital: $${tier.balance}
-Target: $${tier.target}
-Max DD: 17%
-
-Paste any Solana CA to start trading\\.
-    `.trim()), {
-      reply_markup: { inline_keyboard: [[{ text: "Open Live Positions", callback_data: "refresh_pos" }]] }
-    });
+    return ctx.replyWithMarkdownV2(
+      "*FREE $200 ACCOUNT ACTIVATED*\n\n" +
+      "Capital: $200\n" +
+      "Target: $460\n" +
+      "Max DD: 17%\n\n" +
+      "Start trading now",
+      { reply_markup: { inline_keyboard: [[{ text: "Open Live Positions", callback_data: "refresh_pos" }]] } }
+    );
   }
 
-  // === NORMAL REFERRAL HANDLING ===
+  // INFLUENCER REFERRAL
   let influencerId = null;
-  if (referralCode && referralCode !== 'free200') {
-    influencerId = await new Promise(r => db.get('SELECT influencer_id FROM influencers WHERE referral_code = ?', [referralCode], (_, row) => r(row?.influencer_id)));
+  if (payload && payload !== 'free200') {
+    const row = await new Promise(r => db.get('SELECT influencer_id FROM influencers WHERE referral_code = ?', [payload], (_, row) => r(row)));
+    influencerId = row?.influencer_id;
   }
 
-  // === YOUR NORMAL WELCOME MESSAGE ===
+  // NORMAL WELCOME MESSAGE — NO UNESCAPED DOTS
   ctx.replyWithMarkdownV2(
     "*CRUCIBLE — SOLANA PROP FIRM*\n\n" +
-    "Purchase an account and start high leveraging\\.\n" +
-    "Ready to test your discipline?\\.\n" +
-    "Only the weak will fail\\.\n\n" +
-    "No KYC\\.\n" +
-    "No bullshit\\.\n" +
-    "No second chances\\.\n\n" +
-    "You either pass — or you evolve\\.\n\n" +
+    "Purchase an account and start high leveraging\n" +
+    "Ready to test your discipline?\n" +
+    "Only the weak will fail\n\n" +
+    "No KYC\n" +
+    "No bullshit\n" +
+    "No second chances\n\n" +
+    "You either pass — or you evolve\n\n" +
     "Live sniping channel: @Crucibleprop\n\n" +
     "Still breathing?",
     {
