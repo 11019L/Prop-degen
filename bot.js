@@ -122,14 +122,14 @@ async function getTokenData(ca) {
 // START
 bot.start(ctx => {
   ctx.replyWithMarkdownV2(esc(`
-*CRUCIBLE ---- SOLANA PROP FIRM*
+*CRUCIBLE — SOLANA PROP FIRM*
 
-purchase an account and start high leveraging\\.
-Ready to test your discipline?\\.  
+Purchase an account and start high leveraging\\.
+Ready to test your discipline?\\.
 Only the weak will fail\\.
 
-No KYC\\.  
-No bullshit\\.  
+No KYC\\.
+No bullshit\\.
 only second chances\\.
 
 You either pass — or you evolve\\.
@@ -145,7 +145,6 @@ Still breathing?`.trim()), {
     }
   });
 });
-
 bot.action('rules', ctx => ctx.replyWithMarkdownV2(esc(`
 *CRUCIBLE CHALLENGE RULES*
 
