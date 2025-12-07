@@ -124,7 +124,10 @@ async function getTokenData(ca) {
     priceChange: { h1: 0 }
   };
 }
-
+// KEEP THE BOT AWAKE — MUST BE EXACTLY THIS
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
+});
 // =============================================
 // 1. INFLUENCER SYSTEM — 20% ONE-TIME ONLY
 // =============================================
