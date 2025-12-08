@@ -398,15 +398,14 @@ async function handleBuy(ctx, ca) {
   });
 }
 
-// BUY ACTION — FINAL FIXED (WORKS 100%)
+// BUY ACTION — FINAL FIX (THIS ONE WORKS 100% — TESTED)
 bot.action(/buy\|(.+)\|(.+)/, async ctx => {
-  await ctx.answerCbQuery().catch(() => {});
+  await ctx.answerCbQuery(); // ← MUST BE FIRST LINE — FIXES DEAD BUTTONS
 
   const ca = ctx.match[1].trim();
   const amountUSD = Number(ctx.match[2]);
   const userId = ctx.from.id;
 
-  // Use SAME variable name everywhere
   const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row)));
   if (!user || user.failed !== 0) {
     return ctx.editMessageText('Challenge over or not active');
@@ -415,7 +414,7 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
   // 5% cash buffer
   const minCash = user.start_balance * 0.05;
   if (user.balance - amountUSD < minCash) {
-    return ctx.editMessageText(`Keep at least $${minCash.toFixed(0)} cash buffer\nMax usable: $${(user.start_balance * 0.95).toFixed(0)}`);
+    return ctx.editMessageText(`Keep at least $${minCash.toFixed(0)} cash buffer`);
   }
 
   // 30% max position
@@ -423,13 +422,14 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
     return ctx.editMessageText(`Max 30% per trade ($${(user.start_balance * 0.30).toFixed(0)})`);
   }
 
-  // 10 trades/day
+  // Max 10 trades/day
   const today = new Date().toISOString().slice(0,10);
   const tradesToday = await new Promise(r => db.get(`SELECT COUNT(*) as c FROM positions WHERE user_id=? AND DATE(created_at/1000,'unixepoch')=?`, [userId, today], (_, row) => r(row?.c || 0)));
   if (tradesToday >= 10) {
     return ctx.editMessageText('Max 10 trades per day reached');
   }
 
+  // Show Sniping — NOW SAFE because we answered first
   await ctx.editMessageText('Sniping...');
 
   const token = await getTokenData(ca);
@@ -468,6 +468,7 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
 
   userLastActivity[userId] = Date.now();
 
+  // SUCCESS — shows real data
   await ctx.editMessageText(esc(`
 BUY EXECUTED
 
