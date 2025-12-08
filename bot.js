@@ -582,6 +582,7 @@ async function showPositions(ctx) {
   ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
 }
 
+// FASTEST & MOST ACCURATE renderPanel – 2025 final version
 async function renderPanel(userId, chatId, messageId) {
   const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row)));
   if (!user) return;
@@ -591,8 +592,18 @@ async function renderPanel(userId, chatId, messageId) {
   let totalPnL = 0;
   const buttons = [];
 
+  // PRICE CACHE SO WE DON'T HAMMER API 20 TIMES PER SECOND
+  const priceCache = {};
+
   for (const p of positions) {
-    const live = await getTokenData(p.ca);
+    let live;
+    if (priceCache[p.ca]) {
+      live = priceCache[p.ca];
+    } else {
+      live = await getTokenData(p.ca);        // Birdeye hits instantly with your key
+      priceCache[p.ca] = live;
+    }
+
     const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
     const pnlPct = p.entry_price > 0 ? ((live.price - p.entry_price) / p.entry_price) * 100 : 0;
     totalPnL += pnlUSD;
@@ -607,43 +618,38 @@ async function renderPanel(userId, chatId, messageId) {
     ]);
   }
 
- // ─────── FINAL & PERFECT: 30% TRAILING DRAWDOWN FROM PEAK EQUITY ───────
-const equity = user.balance + totalPnL;
-const initialBalance = user.start_balance;
+  const equity = user.balance + totalPnL;
 
-// Update peak equity (trailing high-water mark)
-let peak = user.peak_equity || initialBalance;
-if (equity > peak) {
-  peak = equity;
-  await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [peak, userId], r));
-}
+  // 30% TRAILING DRAWDOWN – BULLETPROOF
+  let peak = user.peak_equity || user.start_balance;
+  if (equity > peak) {
+    peak = equity;
+    await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [peak, userId], r));
+  }
 
-// Current drawdown from the absolute highest point ever reached
-const drawdownPercent = ((peak - equity) / peak) * 100;
-const isBreached = drawdownPercent >= 30;
+  const drawdownPercent = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
+  const isBreached = drawdownPercent >= 30;
 
-// Auto-fail only when 30% drawdown from peak is hit
-if (user.failed === 0 && isBreached) {
-  await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
-}
+  // INSTANT FAIL + STOP TRADING
+  if (user.failed === 0 && isBreached) {
+    await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
+  }
 
-// Auto-pass
-if (user.failed === 0 && equity >= user.target) {
-  await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
-}
+  if (user.failed === 0 && equity >= user.target) {
+    await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
+  }
 
-// Status & display
-let status = '';
-if (user.failed === 1) status = '*CHALLENGE FAILED — 30% DRAWDOWN FROM PEAK*\n\n';
-if (user.failed === 2) status = '*CHALLENGE PASSED!*\n\n';
+  let status = '';
+  if (user.failed === 1) status = '*CHALLENGE FAILED — 30% DD BREACHED*\n\n';
+  if (user.failed === 2) status = '*CHALLENGE PASSED! SEND WALLET FOR PAYOUT*\n\n';
 
-const text = esc(`
+  const text = esc(`
 ${status}*LIVE POSITIONS* (real-time)
 
-Equity    $${equity.toFixed(2)}
-Unrealized  ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
-Peak Equity $${peak.toFixed(2)}
-Drawdown   ${drawdownPercent.toFixed(2)}% ${isBreached ? 'BREACHED' : ''}
+Equity       $${equity.toFixed(2)}
+Unrealized   ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
+Peak Equity  $${peak.toFixed(2)}
+Drawdown     ${drawdownPercent.toFixed(2)}% ${isBreached ? 'BREACHED' : ''}
 
 ${positions.length === 0 ? 'No open positions' : ''}
 `.trim());
@@ -657,7 +663,7 @@ ${positions.length === 0 ? 'No open positions' : ''}
         [{ text: 'Close Panel', callback_data: 'close_pos' }]
       ]
     }
-  }).catch(() => {}); // ignore if message deleted
+  }).catch(() => {});
 }
 
 bot.action('refresh_pos', async ctx => {
