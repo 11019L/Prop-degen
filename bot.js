@@ -603,14 +603,13 @@ async function renderPanel(userId, chatId, messageId) {
     totalPnL += pnlUSD;
 
     buttons.push([
-      { text: `${live.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% ($${pnlUSD.toFixed(2)})`, callback_data: 'noop' },
+       { text: `${live.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% ($${pnlUSD.toFixed(2)})`, callback_data: 'noop' },
       ...(user.failed === 0 ? [
         { text: '25%', callback_data: `sell_${p.id}_25` },
         { text: '50%', callback_data: `sell_${p.id}_50` },
         { text: '100%', callback_data: `sell_${p.id}_100` }
       ] : [])
-    ])
-    ]);
+    ]); // ← only one closing bracket
   }
 
   const equity = user.balance + totalPnL;
