@@ -28,12 +28,11 @@ const MAX_TRADES_PER_DAY = 5;
 const INACTIVITY_HOURS = 48;
 
 const TIERS = {
-  20: { balance: 200, target: 460, bounty: 140 },
-  30: { balance: 300, target: 690, bounty: 210 },
-  40: { balance: 400, target: 920, bounty: 280 },
-  50: { balance: 500, target: 1150, bounty: 350 }
+  20: { balance: 200,  target: 500,  bounty: 220 },
+  30: { balance: 300,  target: 750,  bounty: 330 },
+  40: { balance: 400,  target: 1000, bounty: 440 },
+  50: { balance: 500,  target: 1250, bounty: 550 }
 };
-
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, paid INTEGER DEFAULT 0, balance REAL, start_balance REAL, target REAL, bounty REAL, failed INTEGER DEFAULT 0)`);
   db.run(`CREATE TABLE IF NOT EXISTS positions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, ca TEXT, symbol TEXT, amount_usd REAL, tokens_bought REAL, entry_price REAL, created_at INTEGER)`);
@@ -418,6 +417,16 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
   const today = new Date().toISOString().slice(0, 10);
   const tradesToday = await new Promise(r => db.get(`SELECT COUNT(*) as c FROM positions WHERE user_id=? AND DATE(created_at/1000,'unixepoch')=?`, [userId, today], (_, row) => r(row?.c || 0)));
   if (tradesToday >= MAX_TRADES_PER_DAY) return ctx.editMessageText('Max 5 trades/day');
+    // 5% cash buffer
+  const minCash = user.start_balance * 0.05;
+  if (user.balance - amountUSD < minCash) {
+    return ctx.editMessageText(`Keep at least $${minCash.toFixed(0)} cash buffer\nMax usable: $${(user.start_balance * 0.95).toFixed(0)}`);
+  }
+
+  // 30% max per trade
+  if (amountUSD > user.start_balance * 0.30) {
+    return ctx.editMessageText(`Max 30% per trade ($${ (user.start_balance * 0.30).toFixed(0) })`);
+  }
 
   // === 2. GET TOKEN DATA ===
   const token = await getTokenData(ca);
@@ -591,16 +600,12 @@ async function renderPanel(userId, chatId, messageId) {
 
   let totalPnL = 0;
   const buttons = [];
-
-  // PRICE CACHE SO WE DON'T HAMMER API 20 TIMES PER SECOND
-  const priceCache = {};
+  const priceCache = {}; // fast refresh
 
   for (const p of positions) {
-    let live;
-    if (priceCache[p.ca]) {
-      live = priceCache[p.ca];
-    } else {
-      live = await getTokenData(p.ca);        // Birdeye hits instantly with your key
+    let live = priceCache[p.ca];
+    if (!live) {
+      live = await getTokenData(p.ca);
       priceCache[p.ca] = live;
     }
 
@@ -620,7 +625,7 @@ async function renderPanel(userId, chatId, messageId) {
 
   const equity = user.balance + totalPnL;
 
-  // 30% TRAILING DRAWDOWN – BULLETPROOF
+  // 35% TRAILING DRAWDOWN — FINAL & BULLETPROOF
   let peak = user.peak_equity || user.start_balance;
   if (equity > peak) {
     peak = equity;
@@ -628,20 +633,26 @@ async function renderPanel(userId, chatId, messageId) {
   }
 
   const drawdownPercent = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
-  const isBreached = drawdownPercent >= 30;
+  const isBreached = drawdownPercent >= 35;
 
-  // INSTANT FAIL + STOP TRADING
+  // Only fail on real 35% drawdown
   if (user.failed === 0 && isBreached) {
     await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
   }
 
+  // Auto-pass
   if (user.failed === 0 && equity >= user.target) {
     await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
   }
 
+  // Warnings
+  let ddWarning = '';
+  if (drawdownPercent >= 25 && drawdownPercent < 35) ddWarning = '\nWarning: DANGER ZONE – SELL OR RISK FAIL';
+  if (drawdownPercent >= 32) ddWarning = '\nWarning: FINAL WARNING – NEXT TICK MAY KILL';
+
   let status = '';
-  if (user.failed === 1) status = '*CHALLENGE FAILED — 30% DD BREACHED*\n\n';
-  if (user.failed === 2) status = '*CHALLENGE PASSED! SEND WALLET FOR PAYOUT*\n\n';
+  if (user.failed === 1) status = '*CHALLENGE FAILED — 35% DRAWDOWN BREACHED*\n\n';
+  if (user.failed === 2) status = `*PASSED! $${user.bounty} + 100% OF ALL FUTURE PROFITS ARE YOURS*\nSend wallet for payout\n\n`;
 
   const text = esc(`
 ${status}*LIVE POSITIONS* (real-time)
@@ -649,7 +660,7 @@ ${status}*LIVE POSITIONS* (real-time)
 Equity       $${equity.toFixed(2)}
 Unrealized   ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
 Peak Equity  $${peak.toFixed(2)}
-Drawdown     ${drawdownPercent.toFixed(2)}% ${isBreached ? 'BREACHED' : ''}
+Drawdown     ${drawdownPercent.toFixed(2)}% of peak${ddWarning}
 
 ${positions.length === 0 ? 'No open positions' : ''}
 `.trim());
