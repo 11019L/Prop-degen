@@ -599,7 +599,7 @@ async function showPositions(ctx) {
 }
 
 async function renderPanel(userId, chatId, messageId) {
-  // ALWAYS GET FRESH USER DATA — fixes stuck unrealized PnL forever
+  // Fresh user data every single refresh — fixes stuck PnL
   const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row)));
   if (!user) return;
 
@@ -607,14 +607,10 @@ async function renderPanel(userId, chatId, messageId) {
 
   let totalPnL = 0;
   const buttons = [];
-  const priceCache = {}; // prevents 10 API calls per refresh
 
+  // NO CACHE — every price is fetched fresh for maximum speed/accuracy
   for (const p of positions) {
-    let live = priceCache[p.ca];
-    if (!live) {
-      live = await getTokenData(p.ca);
-      priceCache[p.ca] = live;
-    }
+    const live = await getTokenData(p.ca);  // always fresh
 
     const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
     const pnlPct = p.entry_price > 0 ? ((live.price - p.entry_price) / p.entry_price) * 100 : 0;
@@ -627,12 +623,13 @@ async function renderPanel(userId, chatId, messageId) {
         { text: '50%', callback_data: `sell_${p.id}_50` },
         { text: '100%', callback_data: `sell_${p.id}_100` }
       ] : [])
+    ])
     ]);
   }
 
   const equity = user.balance + totalPnL;
 
-  // 35% TRAILING DRAWDOWN — ONLY FROM REAL PROFIT PEAK
+  // 35% trailing drawdown — only from real profit peak
   let peak = user.peak_equity || user.start_balance;
   if (equity > peak) {
     peak = equity;
@@ -642,24 +639,22 @@ async function renderPanel(userId, chatId, messageId) {
   const drawdownFromPeak = peak > user.start_balance ? ((peak - equity) / peak) * 100 : 0;
   const isBreached = drawdownFromPeak >= 35;
 
-  // Fail only on real loss
   if (user.failed === 0 && isBreached) {
     await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
   }
 
-  // Auto-pass
   if (user.failed === 0 && equity >= user.target) {
     await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
   }
 
-  // Smart warnings
+  // Warnings
   let ddWarning = '';
-  if (drawdownFromPeak >= 25 && drawdownFromPeak < 35) ddWarning = '\nDANGER ZONE — SELL OR RISK FAIL';
-  if (drawdownFromPeak >= 32) ddWarning = '\nFINAL WARNING — NEXT TICK MAY KILL';
+  if (drawdownFromPeak >= 25 && drawdownFromPeak < 35) ddWarning = '\nDANGER ZONE — SELL FAST';
+  if (drawdownFromPeak >= 32) ddWarning = '\nFINAL WARNING — NEXT TICK KILLS';
 
   let status = '';
-  if (user.failed === 1) status = '*CHALLENGE FAILED — 35% DRAWDOWN BREACHED*\n\n';
-  if (user.failed === 2) status = `*PASSED! $${user.bounty} + 100% OF ALL FUTURE PROFITS*\nSend wallet for payout\n\n`;
+  if (user.failed === 1) status = '*CHALLENGE FAILED — 35% DD*\n\n';
+  if (user.failed === 2) status = `*PASSED! $${user.bounty} + 100% PROFITS YOURS*\nSend wallet\n\n`;
 
   const text = esc(`
 ${status}*LIVE POSITIONS* (real-time)
@@ -667,13 +662,10 @@ ${status}*LIVE POSITIONS* (real-time)
 Equity       $${equity.toFixed(2)}
 Unrealized   ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
 Peak Equity  $${peak.toFixed(2)}
-Drawdown     ${drawdownFromPeak.toFixed(2)}% of peak${ddWarning}
+Drawdown     ${drawdownFromPeak.toFixed(2)}%${ddWarning}
 
 ${positions.length === 0 ? 'No open positions' : ''}
 `.trim());
-
-  // Faster refresh when in danger
-  const refreshRate = drawdownFromPeak >= 20 ? 1500 : 2200;
 
   await bot.telegram.editMessageText(chatId, messageId, null, text, {
     parse_mode: 'MarkdownV2',
@@ -681,16 +673,16 @@ ${positions.length === 0 ? 'No open positions' : ''}
       inline_keyboard: [
         ...buttons,
         [{ text: 'Refresh', callback_data: 'refresh_pos' }],
-        [{ text: 'Close Panel', callback_data: 'close_pos' }]
+        [{ text: 'Close', callback_data: 'close_pos' }]
       ]
     }
   }).catch(() => {});
 
-  // Update interval for next refreshes
+  // MAXIMUM SPEED: refresh every 1.3 seconds (feels instant)
   if (ACTIVE_POSITION_PANELS.has(userId)) {
     clearInterval(ACTIVE_POSITION_PANELS.get(userId).intervalId);
   }
-  const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), refreshRate);
+  const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), 1300);
   ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
 }
 
