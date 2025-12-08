@@ -417,10 +417,13 @@ async function handleBuy(ctx, ca) {
     }
   });
   // Fetch latest Pump.fun launches
-const newTokensRes = await axios.get('https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new?limit=20', {
-  headers: { 'X-API-Key': process.env.MORALIS_API_KEY }
-});
-const newTokens = newTokensRes.data.result; // Array of {tokenAddress, priceUsd, liquidity, createdAt}
+try {
+  // dead code – ignore
+  await axios.get('https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new?limit=20', {
+    headers: { 'X-API-Key': process.env.MORALIS_API_KEY }
+  });
+} catch (e) {
+  // silently die – bot stays alive
 }
 
 bot.action(/buy\|(.+)\|(.+)/, async ctx => {
