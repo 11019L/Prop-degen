@@ -598,8 +598,8 @@ async function showPositions(ctx) {
   ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
 }
 
-// FASTEST & MOST ACCURATE renderPanel – 2025 final version
 async function renderPanel(userId, chatId, messageId) {
+  // ALWAYS GET FRESH USER DATA — fixes stuck unrealized PnL forever
   const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row)));
   if (!user) return;
 
@@ -607,7 +607,7 @@ async function renderPanel(userId, chatId, messageId) {
 
   let totalPnL = 0;
   const buttons = [];
-  const priceCache = {}; // fast refresh
+  const priceCache = {}; // prevents 10 API calls per refresh
 
   for (const p of positions) {
     let live = priceCache[p.ca];
@@ -632,17 +632,17 @@ async function renderPanel(userId, chatId, messageId) {
 
   const equity = user.balance + totalPnL;
 
-  // 35% TRAILING DRAWDOWN — FINAL & BULLETPROOF
+  // 35% TRAILING DRAWDOWN — ONLY FROM REAL PROFIT PEAK
   let peak = user.peak_equity || user.start_balance;
   if (equity > peak) {
     peak = equity;
     await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [peak, userId], r));
   }
 
-  const drawdownPercent = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
-  const isBreached = drawdownPercent >= 35;
+  const drawdownFromPeak = peak > user.start_balance ? ((peak - equity) / peak) * 100 : 0;
+  const isBreached = drawdownFromPeak >= 35;
 
-  // Only fail on real 35% drawdown
+  // Fail only on real loss
   if (user.failed === 0 && isBreached) {
     await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
   }
@@ -652,14 +652,14 @@ async function renderPanel(userId, chatId, messageId) {
     await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
   }
 
-  // Warnings
+  // Smart warnings
   let ddWarning = '';
-  if (drawdownPercent >= 25 && drawdownPercent < 35) ddWarning = '\nWarning: DANGER ZONE – SELL OR RISK FAIL';
-  if (drawdownPercent >= 32) ddWarning = '\nWarning: FINAL WARNING – NEXT TICK MAY KILL';
+  if (drawdownFromPeak >= 25 && drawdownFromPeak < 35) ddWarning = '\nDANGER ZONE — SELL OR RISK FAIL';
+  if (drawdownFromPeak >= 32) ddWarning = '\nFINAL WARNING — NEXT TICK MAY KILL';
 
   let status = '';
   if (user.failed === 1) status = '*CHALLENGE FAILED — 35% DRAWDOWN BREACHED*\n\n';
-  if (user.failed === 2) status = `*PASSED! $${user.bounty} + 100% OF ALL FUTURE PROFITS ARE YOURS*\nSend wallet for payout\n\n`;
+  if (user.failed === 2) status = `*PASSED! $${user.bounty} + 100% OF ALL FUTURE PROFITS*\nSend wallet for payout\n\n`;
 
   const text = esc(`
 ${status}*LIVE POSITIONS* (real-time)
@@ -667,10 +667,13 @@ ${status}*LIVE POSITIONS* (real-time)
 Equity       $${equity.toFixed(2)}
 Unrealized   ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
 Peak Equity  $${peak.toFixed(2)}
-Drawdown     ${drawdownPercent.toFixed(2)}% of peak${ddWarning}
+Drawdown     ${drawdownFromPeak.toFixed(2)}% of peak${ddWarning}
 
 ${positions.length === 0 ? 'No open positions' : ''}
 `.trim());
+
+  // Faster refresh when in danger
+  const refreshRate = drawdownFromPeak >= 20 ? 1500 : 2200;
 
   await bot.telegram.editMessageText(chatId, messageId, null, text, {
     parse_mode: 'MarkdownV2',
@@ -682,6 +685,13 @@ ${positions.length === 0 ? 'No open positions' : ''}
       ]
     }
   }).catch(() => {});
+
+  // Update interval for next refreshes
+  if (ACTIVE_POSITION_PANELS.has(userId)) {
+    clearInterval(ACTIVE_POSITION_PANELS.get(userId).intervalId);
+  }
+  const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), refreshRate);
+  ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
 }
 
 bot.action('refresh_pos', async ctx => {
