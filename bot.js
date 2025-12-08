@@ -22,7 +22,7 @@ const INFLUENCER_COMMISSION = 0.2; // 20%
 // ONLY ONE MESSAGE ID SYSTEM — FIXED
 const positionsMessageId = {};           // userId → message_id (this is the one we use)
 const userLastActivity = {};             // 48h inactivity
-const DRAWDOWN_MAX = 17;                 // 17% drawdown
+const DRAWDOWN_MAX = 30;                 // 17% drawdown
 const MAX_POSITION_PERCENT = 0.25;       // 25% max per trade
 const MAX_TRADES_PER_DAY = 5;
 const INACTIVITY_HOURS = 48;
@@ -145,40 +145,10 @@ bot.command('generate_code', async ctx => {
 
 // FINAL FIXED /START — Free accounts + referrals + normal start
 bot.start(async ctx => {
-  const payload = ctx.startPayload || ''; // '' if no payload
+  const payload = ctx.startPayload || '';
 
-  // FREE $200 ACCOUNT LINK
-  if (payload === 'free200') {
-    const userId = ctx.from.id;
-    const tier = { balance: 200, target: 460, bounty: 140 };
-
-    await new Promise(r => db.run(`
-      INSERT OR REPLACE INTO users 
-      (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity)
-      VALUES (?, 1, ?, ?, ?, ?, 0, ?)
-    `, [userId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance], r));
-
-    await new Promise(r => db.run('DELETE FROM positions WHERE user_id = ?', [userId], r));
-
-    return ctx.replyWithMarkdownV2(
-      "*FREE $200 ACCOUNT ACTIVATED*\n\n" +
-      "Capital: $200\n" +
-      "Target: $460\n" +
-      "Max DD: 17%\n\n" +
-      "Start trading now",
-      { reply_markup: { inline_keyboard: [[{ text: "Open Live Positions", callback_data: "refresh_pos" }]] } }
-    );
-  }
-
-  // INFLUENCER REFERRAL
-  let influencerId = null;
-  if (payload && payload !== 'free200') {
-    const row = await new Promise(r => db.get('SELECT influencer_id FROM influencers WHERE referral_code = ?', [payload], (_, row) => r(row)));
-    influencerId = row?.influencer_id;
-  }
-
-  // NORMAL WELCOME MESSAGE — NO UNESCAPED DOTS
-  ctx.replyWithMarkdownV2(
+  // ←←←← 1. ALWAYS SHOW THE NORMAL WELCOME FIRST ←←←←
+  await ctx.replyWithMarkdownV2(
     "*CRUCIBLE — SOLANA PROP FIRM*\n\n" +
     "Purchase an account and start high leveraging\n" +
     "Ready to test your discipline?\n" +
@@ -198,8 +168,39 @@ bot.start(async ctx => {
       }
     }
   );
-});
 
+  // ←←←← 2. NOW CHECK IF IT'S THE FREE $200 LINK ←←←←
+  if (payload === 'free200') {
+    const userId = ctx.from.id;
+    const tier = { balance: 200, target: 460, bounty: 140 };
+
+    // Create/activate free account
+    await new Promise(r => db.run(`
+      INSERT OR REPLACE INTO users 
+      (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity)
+      VALUES (?, 1, ?, ?, ?, ?, 0, ?)
+    `, [userId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance], r));
+
+    // Clear any old positions
+    await new Promise(r => db.run('DELETE FROM positions WHERE user_id = ?', [userId], r));
+
+    // Send the success message right after the welcome
+    return ctx.replyWithMarkdownV2(
+      "*FREE $200 ACCOUNT ACTIVATED*\n\n" +
+      "Capital: $200\n" +
+      "Target: $460\n" +
+      "Max DD: 30% trailing\n\n" +
+      "Start trading now\\.",
+      {
+        reply_markup: {
+          inline_keyboard: [[{ text: "Open Live Positions", callback_data: "refresh_pos" }]]
+        }
+      }
+    );
+  }
+
+  // ←←←← IF NOT free200 → do nothing more (they already saw the welcome already)
+});
 bot.action('rules', ctx => ctx.replyWithMarkdownV2(esc(`
 *CRUCIBLE CHALLENGE RULES*
 
@@ -634,39 +635,46 @@ async function renderPanel(userId, chatId, messageId) {
     ]);
   }
 
-  const equity = user.balance + totalPnL;
+ // ─────── FINAL & PERFECT: 30% TRAILING DRAWDOWN FROM PEAK EQUITY ───────
+const equity = user.balance + totalPnL;
+const initialBalance = user.start_balance;
 
-  // PEAK EQUITY & 17% DRAWDOWN — 100% CORRECT
-  let peak = user.peak_equity || user.start_balance;
-  if (equity > peak) {
-    peak = equity;
-    await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [equity, userId], r));
-  }
+// Update peak equity (trailing high-water mark)
+let peak = user.peak_equity || initialBalance;
+if (equity > peak) {
+  peak = equity;
+  await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [peak, userId], r));
+}
 
-  const floor = peak * (1 - 17 / 100);
-  const drawdown = equity < peak ? ((peak - equity) / peak) * 100 : 0;
+// Current drawdown from the absolute highest point ever reached
+const drawdownPercent = ((peak - equity) / peak) * 100;
+const isBreached = drawdownPercent >= 30;
 
-  // Auto-fail on 17% breach
-  if (user.failed === 0 && equity < floor) {
-    await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
-  }
+// Auto-fail only when 30% drawdown from peak is hit
+if (user.failed === 0 && isBreached) {
+  await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
+}
 
-  // Auto-pass
-  if (user.failed === 0 && equity >= user.target) {
-    await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
-  }
+// Auto-pass
+if (user.failed === 0 && equity >= user.target) {
+  await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
+}
 
-  const status = user.failed === 1 ? '*CHALLENGE FAILED — 17% DD BREACHED*\n\n' :
-                 user.failed === 2 ? '*CHALLENGE PASSED\\!*\n\n' : '';
+// Status & display
+let status = '';
+if (user.failed === 1) status = '*CHALLENGE FAILED — 30% DRAWDOWN FROM PEAK*\n\n';
+if (user.failed === 2) status = '*CHALLENGE PASSED!*\n\n';
 
-  const text = esc(`
+const text = esc(`
 ${status}*LIVE POSITIONS* (real-time)
 
-Equity: $${equity.toFixed(2)}
-Unrealized PnL: ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
-Drawdown: ${drawdown.toFixed(2)}% (max 17%)
-${positions.length === 0 ? '\nNo open positions' : ''}
-  `.trim());
+Equity    $${equity.toFixed(2)}
+Unrealized  ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
+Peak Equity $${peak.toFixed(2)}
+Drawdown   ${drawdownPercent.toFixed(2)}% ${isBreached ? 'BREACHED' : ''}
+
+${positions.length === 0 ? 'No open positions' : ''}
+`.trim());
 
   await bot.telegram.editMessageText(chatId, messageId, null, text, {
     parse_mode: 'MarkdownV2',
