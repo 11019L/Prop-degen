@@ -53,73 +53,54 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
-  // === 1. TRY MORALIS (CORRECT ENDPOINT) ===
+  // 1. BIRDEYE — PRIMARY & BEST (you now have a real key!)
   try {
-    const priceRes = await axios.get(`https://solana-gateway.moralis.io/token/mainnet/${ca}/price`, {
+    const birdRes = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
       headers: {
-        'accept': 'application/json',
-        'X-API-Key': process.env.MORALIS_API_KEY || '' // Optional now optional for low volume
+        'x-api-key': process.env.BIRDEYE_API_KEY,
+        'accept': 'application/json'
       },
       timeout: 6000
     });
 
-    const priceData = priceRes.data;
-    if (priceData?.usdPrice > 0) {
-      // Try metadata too (optional)
-      let symbol = ca.slice(0, 8) + '...';
-      try {
-        const metaRes = await axios.get(`https://solana-gateway.moralis.io/token/mainnet/${ca}/metadata`, {
-          headers: { 'X-API-Key': process.env.MORALIS_API_KEY || '' },
-          timeout: 4000
-        });
-        symbol = metaRes.data.symbol || symbol;
-      } catch {}
-
-      const mc = priceData.usdPrice * (priceData.totalSupply || 1e9);
+    if (birdRes.data?.success && birdRes.data.data?.value > 0) {
+      const d = birdRes.data.data;
       return {
-        symbol,
-        price: priceData.usdPrice,
-        mc: formatMC(mc),
-        age: 'Live',
-        liquidity: priceData.liquidity?.usd || 0,
-        priceChange: { h1: priceData.priceChange?.h1 || 0 }
-      };
-    }
-  } catch (e) {
-    console.log('Moralis failed:', e.response?.status || e.message);
-  }
-
-  // === 2. BIRDEYE WITH API KEY ===
-  try {
-    const birdRes = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
-      headers: {
-        'x-api-key': process.env.BIRDEYE_API_KEY,  // REQUIRED NOW
-        'accept': 'application/json'
-      },
-      timeout: 5000
-    });
-
-    const d = birdRes.data.data;
-    if (d?.value > 0) {
-      return {
-        symbol: d.symbol || ca.slice(0,8)+'...',
+        symbol: d.symbol || ca.slice(0, 8) + '...',
         price: d.value,
         mc: d.mc ? formatMC(d.mc) : 'N/A',
-        age: 'Live',
         liquidity: d.liquidity || 0,
         priceChange: { h1: d.priceChange24h || 0 }
       };
     }
   } catch (e) {
-    console.log('Birdeye failed:', e.response?.status || e.message);
+    console.log('Birdeye failed (check key/logs):', e.response?.status || e.message);
   }
 
-  // === 3. LAST RESORT (for brand new pump.fun tokens) ===
+  // 2. DEXSCREENER — FREE BACKUP (in case Birdeye ever throttles)
+  try {
+    const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 5000 });
+    const pair = dexRes.data.pairs?.find(p => p.quoteToken?.symbol === 'SOL' && p.dexId === 'raydium') 
+                 || dexRes.data.pairs?.[0];
+
+    if (pair && pair.priceUsd && parseFloat(pair.priceUsd) > 0) {
+      return {
+        symbol: pair.baseToken.symbol || ca.slice(0, 8) + '...',
+        price: parseFloat(pair.priceUsd),
+        mc: pair.fdv ? formatMC(parseFloat(pair.fdv)) : 'N/A',
+        liquidity: parseFloat(pair.liquidity?.usd || 0),
+        priceChange: { h1: parseFloat(pair.priceChange?.h1 || 0) }
+      };
+    }
+  } catch (e) {
+    console.log('DexScreener backup failed:', e.message);
+  }
+
+  // 3. FINAL SAFETY — BLOCKS FAKE BUYS
   return {
-    symbol: ca.slice(0,8)+'...',
-    price: 0.000001,
-    mc: 'New',
-    age: 'Live',
+    symbol: ca.slice(0, 8) + '...',
+    price: 0,
+    mc: 'Error',
     liquidity: 0,
     priceChange: { h1: 0 }
   };
