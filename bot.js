@@ -685,46 +685,6 @@ bot.action('close_pos', async ctx => {
   await ctx.deleteMessage();
 });
 
-// SINGLE TOKEN VIEW — WORKS 100%
-bot.action(/view_(\d+)/, async ctx => {
-  await ctx.answerCbQuery();
-
-  const posId = ctx.match[1];
-  const userId = ctx.from.id;
-
-  const pos = await new Promise(r => db.get('SELECT * FROM positions WHERE id = ? AND user_id = ?', [posId, userId], (_, row) => r(row)));
-  if (!pos) return ctx.editMessageText('Position not found');
-
-  const live = await getTokenData(pos.ca);
-
-  const pnlUSD = (live.price - pos.entry_price) * pos.tokens_bought;
-  const pnlPct = ((live.price - pos.entry_price) / pos.entry_price) * 100;
-
-  const text = esc(`
-${live.symbol} — LIVE DETAIL
-
-Entry      $${pos.entry_price.toFixed(12)}
-Current    $${live.price.toFixed(12)}
-PnL        ${pnlPct >= 0 ? '+' : ''}$${pnlUSD.toFixed(2)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)
-Tokens     ${pos.tokens_bought.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
-Value      $${(live.price * pos.tokens_bought).toFixed(2)}
-MC         ${live.mc}
-Liquidity  $${live.liquidity.toFixed(0)}
-
-Click Refresh for live price
-  `.trim());
-
-  await ctx.editMessageText(text, {
-    parse_mode: 'MarkdownV2',
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: 'Refresh', callback_data: `view_${pos.id}` }],
-        [{ text: 'Back', callback_data: 'refresh_pos' }]
-      ]
-    }
-  });
-});
-
 // LAUNCH
 bot.launch();
 app.listen(process.env.PORT || 3000, () => console.log('CRUCIBLE BOT — FINAL & PERFECT'));
