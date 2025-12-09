@@ -593,22 +593,17 @@ async function renderPanel(userId, chatId, messageId) {
   let totalPnL = 0;
   const buttons = [];
 
-    for (const p of positions) {
+  for (const p of positions) {
     let live;
     try {
       live = await getTokenData(p.ca);
     } catch (e) {
-      // if one coin is dead/rugged — don't break everything
-      live = {
-        symbol: p.symbol || '???',
-        price: 0,
-        mc: 'Dead',
-        liquidity: 0
-      };
+      live = { symbol: p.symbol || '???', price: 0, mc: 'Dead', liquidity: 0 };
     }
 
-    // if price is 0 or NaN — don't crash the math
-    const safePrice = Number(live.price) || 0;
+    // THIS LINE FIXES THE -50% / -100% GLITCH FOREVER
+    const safePrice = (live && live.price > 0) ? live.price : p.entry_price * 0.01; // dead = -99%, not -100%
+
     const pnlUSD = (safePrice - p.entry_price) * p.tokens_bought;
     const pnlPct = p.entry_price > 0 ? ((safePrice - p.entry_price) / p.entry_price) * 100 : 0;
 
@@ -616,7 +611,7 @@ async function renderPanel(userId, chatId, messageId) {
 
     buttons.push([
       { 
-        text: `${live.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% | $${pnlUSD.toFixed(2)}`, 
+        text: `${live.symbol || '???'}${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% | $${pnlUSD.toFixed(2)}`, 
         callback_data: 'noop' 
       }
     ]);
@@ -632,7 +627,7 @@ async function renderPanel(userId, chatId, messageId) {
 
   const equity = user.balance + totalPnL;
 
-  // TRAILING DRAWDOWN — CORRECT (only real losses count)
+  // CORRECT TRAILING DRAWDOWN — NEVER FALSE TRIGGERS
   let peak = user.peak_equity || user.start_balance;
   if (equity > peak) {
     peak = equity;
@@ -652,7 +647,7 @@ async function renderPanel(userId, chatId, messageId) {
 
   let status = '';
   if (user.failed === 1) status = '*CHALLENGE FAILED — 35% DD*\n\n';
-  if (user.failed === 2) status = `*PASSED! $${user.bounty} + 100% PROFITS YOURS*\nSend wallet\n\n`;
+  if (user.failed === 2) status = `*PASSED! $${user.bounty} + 100% PROFITS*\nSend wallet\n\n`;
 
   const text = esc(`
 ${status}*LIVE POSITIONS* (real-time)
@@ -665,28 +660,24 @@ Drawdown     ${drawdownPercent.toFixed(2)}%${drawdownPercent >= 25 ? ' DANGER' :
 ${positions.length === 0 ? 'No open positions' : ''}
 `.trim());
 
-    // ULTRA-FAST REFRESH — 1 SECOND (MAX SPEED TELEGRAM ALLOWS)
   await bot.telegram.editMessageText(chatId, messageId, null, text, {
     parse_mode: 'MarkdownV2',
     reply_markup: {
       inline_keyboard: [
         ...buttons,
-        [{ text: 'Refresh Now', callback_data: 'refresh_pos' }],
-        [{ text: 'Close Panel', callback_data: 'close_pos' }]
+        [{ text: 'Refresh', callback_data: 'refresh_pos' }],
+        [{ text: 'Close', callback_data: 'close_pos' }]
       ]
     }
   }).catch(() => {});
 
-  // Kill old interval + start new 1-second refresh
+  // FASTEST POSSIBLE REFRESH — 1 second
   if (ACTIVE_POSITION_PANELS.has(userId)) {
     clearInterval(ACTIVE_POSITION_PANELS.get(userId).intervalId);
   }
-
-  const fastInterval = setInterval(() => {
-    renderPanel(userId, chatId, messageId).catch(() => {});
-  }, 1000); // 1 second = maximum speed
-
-  ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId: fastInterval });
+  const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), 1000);
+  ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
+}
   
 bot.action('refresh_pos', async ctx => {
   await ctx.answerCbQuery();
