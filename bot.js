@@ -593,14 +593,27 @@ async function renderPanel(userId, chatId, messageId) {
   let totalPnL = 0;
   const buttons = [];
 
-  for (const p of positions) {
-    const live = await getTokenData(p.ca);
+    for (const p of positions) {
+    let live;
+    try {
+      live = await getTokenData(p.ca);
+    } catch (e) {
+      // if one coin is dead/rugged — don't break everything
+      live = {
+        symbol: p.symbol || '???',
+        price: 0,
+        mc: 'Dead',
+        liquidity: 0
+      };
+    }
 
-    const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
-    const pnlPct = p.entry_price > 0 ? ((live.price - p.entry_price) / p.entry_price) * 100 : 0;
+    // if price is 0 or NaN — don't crash the math
+    const safePrice = Number(live.price) || 0;
+    const pnlUSD = (safePrice - p.entry_price) * p.tokens_bought;
+    const pnlPct = p.entry_price > 0 ? ((safePrice - p.entry_price) / p.entry_price) * 100 : 0;
+
     totalPnL += pnlUSD;
 
-    // Each coin completely separate — moves on its own
     buttons.push([
       { 
         text: `${live.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% | $${pnlUSD.toFixed(2)}`, 
@@ -608,11 +621,10 @@ async function renderPanel(userId, chatId, messageId) {
       }
     ]);
 
-    // Sell buttons — only if not failed
     if (user.failed === 0) {
       buttons.push([
-        { text: '25%', callback_data: `sell_${p.id}_25` },
-        { text: '50%', callback_data: `sell_${p.id}_50` },
+        { text: '25%',  callback_data: `sell_${p.id}_25` },
+        { text: '50%',  callback_data: `sell_${p.id}_50` },
         { text: '100%', callback_data: `sell_${p.id}_100` }
       ]);
     }
@@ -653,24 +665,29 @@ Drawdown     ${drawdownPercent.toFixed(2)}%${drawdownPercent >= 25 ? ' DANGER' :
 ${positions.length === 0 ? 'No open positions' : ''}
 `.trim());
 
+    // ULTRA-FAST REFRESH — 1 SECOND (MAX SPEED TELEGRAM ALLOWS)
   await bot.telegram.editMessageText(chatId, messageId, null, text, {
     parse_mode: 'MarkdownV2',
     reply_markup: {
       inline_keyboard: [
         ...buttons,
-        positions.length > 0 ? [] : [],
-        [{ text: 'Refresh', callback_data: 'refresh_pos' }],
+        [{ text: 'Refresh Now', callback_data: 'refresh_pos' }],
         [{ text: 'Close Panel', callback_data: 'close_pos' }]
       ]
     }
   }).catch(() => {});
 
-  // Ultra-fast refresh
-  if (ACTIVE_POSITION_PANELS.has(userId)) clearInterval(ACTIVE_POSITION_PANELS.get(userId).intervalId);
-  const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), 1300);
-  ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
-}
+  // Kill old interval + start new 1-second refresh
+  if (ACTIVE_POSITION_PANELS.has(userId)) {
+    clearInterval(ACTIVE_POSITION_PANELS.get(userId).intervalId);
+  }
 
+  const fastInterval = setInterval(() => {
+    renderPanel(userId, chatId, messageId).catch(() => {});
+  }, 1000); // 1 second = maximum speed
+
+  ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId: fastInterval });
+  
 bot.action('refresh_pos', async ctx => {
   await ctx.answerCbQuery();
   await showPositions(ctx);
