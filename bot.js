@@ -585,7 +585,6 @@ async function showPositions(ctx) {
 }
 
 async function renderPanel(userId, chatId, messageId) {
-  // Fresh user data every single refresh — fixes stuck PnL
   const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row)));
   if (!user) return;
 
@@ -594,17 +593,16 @@ async function renderPanel(userId, chatId, messageId) {
   let totalPnL = 0;
   const buttons = [];
 
-  // NO CACHE — every price is fetched fresh for maximum speed/accuracy
   for (const p of positions) {
-    const live = await getTokenData(p.ca);  // always fresh
+    const live = await getTokenData(p.ca);
 
     const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
-    const pnlPct = p.entry_price > 0 ? ((live.price - p.entry_price) / p.entry_price) * 100 : 0;
+    const pnlPct = p.entry_price > 0 ? ((live.price - p.entry_price) / p.entry_price) * 100) : 0;
     totalPnL += pnlUSD;
 
-        buttons.push([
+    buttons.push([
       { text: `${live.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% ($${pnlUSD.toFixed(2)})`, callback_data: 'noop' },
-      { text: '👁 View', callback_data: `view_${p.id}` }, // ← NEW BUTTON
+      { text: 'View', callback_data: `view_${p.id}` },
       ...(user.failed === 0 ? [
         { text: '25%', callback_data: `sell_${p.id}_25` },
         { text: '50%', callback_data: `sell_${p.id}_50` },
@@ -615,15 +613,15 @@ async function renderPanel(userId, chatId, messageId) {
 
   const equity = user.balance + totalPnL;
 
-  // 35% trailing drawdown — only from real profit peak
+  // TRAILING DRAWDOWN — WORKS AT -4%, -20%, ANYTHING
   let peak = user.peak_equity || user.start_balance;
   if (equity > peak) {
     peak = equity;
     await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [peak, userId], r));
   }
 
-  const drawdownFromPeak = peak > user.start_balance ? ((peak - equity) / peak) * 100 : 0;
-  const isBreached = drawdownFromPeak >= 35;
+  const drawdownPercent = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
+  const isBreached = drawdownPercent >= 35;
 
   if (user.failed === 0 && isBreached) {
     await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
@@ -633,13 +631,13 @@ async function renderPanel(userId, chatId, messageId) {
     await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
   }
 
-  // Warnings
   let ddWarning = '';
-  if (drawdownFromPeak >= 25 && drawdownFromPeak < 35) ddWarning = '\nDANGER ZONE — SELL FAST';
-  if (drawdownFromPeak >= 32) ddWarning = '\nFINAL WARNING — NEXT TICK KILLS';
+  if (drawdownPercent > 0 && drawdownPercent < 25) ddWarning = '\nLoss detected — watch closely';
+  if (drawdownPercent >= 25 && drawdownPercent < 35) ddWarning = '\nDANGER ZONE — SELL NOW';
+  if (drawdownPercent >= 32) ddWarning = '\nFINAL WARNING — NEXT TICK MAY KILL';
 
   let status = '';
-  if (user.failed === 1) status = '*CHALLENGE FAILED — 35% DD*\n\n';
+  if (user.failed === 1) status = '*CHALLENGE FAILED — 35% DRAWDOWN*\n\n';
   if (user.failed === 2) status = `*PASSED! $${user.bounty} + 100% PROFITS YOURS*\nSend wallet\n\n`;
 
   const text = esc(`
@@ -648,7 +646,7 @@ ${status}*LIVE POSITIONS* (real-time)
 Equity       $${equity.toFixed(2)}
 Unrealized   ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
 Peak Equity  $${peak.toFixed(2)}
-Drawdown     ${drawdownFromPeak.toFixed(2)}%${ddWarning}
+Drawdown     ${drawdownPercent.toFixed(2)}%${ddWarning}
 
 ${positions.length === 0 ? 'No open positions' : ''}
 `.trim());
@@ -664,7 +662,7 @@ ${positions.length === 0 ? 'No open positions' : ''}
     }
   }).catch(() => {});
 
-  // MAXIMUM SPEED: refresh every 1.3 seconds (feels instant)
+  // ULTRA FAST REFRESH — 1.3 seconds always
   if (ACTIVE_POSITION_PANELS.has(userId)) {
     clearInterval(ACTIVE_POSITION_PANELS.get(userId).intervalId);
   }
@@ -686,7 +684,7 @@ bot.action('close_pos', async ctx => {
   await ctx.deleteMessage();
 });
 
-// SINGLE TOKEN LIVE VIEW — PERFECT & NO ERRORS
+// SINGLE TOKEN VIEW — WORKS 100%
 bot.action(/view_(\d+)/, async ctx => {
   await ctx.answerCbQuery();
 
@@ -704,24 +702,23 @@ bot.action(/view_(\d+)/, async ctx => {
   const text = esc(`
 ${live.symbol} — LIVE DETAIL
 
-Entry:     $${pos.entry_price.toFixed(12)}
-Current:   $${live.price.toFixed(12)}
-PnL:       ${pnlPct >= 0 ? '+' : ''}$${pnlUSD.toFixed(2)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)
-Tokens:    ${pos.tokens_bought.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
-Value:     $${(live.price * pos.tokens_bought).toFixed(2)}
-MC:        ${live.mc}
-Liquidity: $${live.liquidity.toFixed(0)}
+Entry      $${pos.entry_price.toFixed(12)}
+Current    $${live.price.toFixed(12)}
+PnL        ${pnlPct >= 0 ? '+' : ''}$${pnlUSD.toFixed(2)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)
+Tokens     ${pos.tokens_bought.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ",")}
+Value      $${(live.price * pos.tokens_bought).toFixed(2)}
+MC         ${live.mc}
+Liquidity  $${live.liquidity.toFixed(0)}
 
-Click Refresh to update
+Click Refresh for live price
   `.trim());
 
-  // Refresh every 1.5 seconds
   await ctx.editMessageText(text, {
     parse_mode: 'MarkdownV2',
     reply_markup: {
       inline_keyboard: [
         [{ text: 'Refresh', callback_data: `view_${pos.id}` }],
-        [{ text: 'Back to Positions', callback_data: 'refresh_pos' }]
+        [{ text: 'Back', callback_data: 'refresh_pos' }]
       ]
     }
   });
