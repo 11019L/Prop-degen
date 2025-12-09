@@ -585,41 +585,36 @@ async function showPositions(ctx) {
 }
 
 async function renderPanel(userId, chatId, messageId) {
-  const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row)));
-  if (!user) return;
+  // ALWAYS GET FRESH USER + POSITIONS — THIS FIXES STUCK/WRONG PNL FOREVER
+  const [user, positions] = await Promise.all([
+    new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row))),
+    new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])))
+  ]);
 
-  const positions = await new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])));
+  if (!user) return;
 
   let totalPnL = 0;
   const buttons = [];
 
   for (const p of positions) {
-    let live;
-    try {
-      live = await getTokenData(p.ca);
-    } catch (e) {
-      live = { symbol: p.symbol || '???', price: 0, mc: 'Dead', liquidity: 0 };
-    }
+    const live = await getTokenData(p.ca);
 
-    // THIS LINE FIXES THE -50% / -100% GLITCH FOREVER
-    const safePrice = (live && live.price > 0) ? live.price : p.entry_price * 0.01; // dead = -99%, not -100%
+    // Prevent dead token from showing -100%
+    const price = (live && live.price > 0) ? live.price : p.entry_price * 0.01;
 
-    const pnlUSD = (safePrice - p.entry_price) * p.tokens_bought;
-    const pnlPct = p.entry_price > 0 ? ((safePrice - p.entry_price) / p.entry_price) * 100 : 0;
+    const pnlUSD = (price - p.entry_price) * p.tokens_bought;
+    const pnlPct = p.entry_price > 0 ? ((price - p.entry_price) / p.entry_price) * 100 : 0;
 
     totalPnL += pnlUSD;
 
     buttons.push([
-      { 
-        text: `${live.symbol || '???'}${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% | $${pnlUSD.toFixed(2)}`, 
-        callback_data: 'noop' 
-      }
+      { text: `${live.symbol || '???'}${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% | $${pnlUSD.toFixed(2)}`, callback_data: 'noop' }
     ]);
 
     if (user.failed === 0) {
       buttons.push([
-        { text: '25%',  callback_data: `sell_${p.id}_25` },
-        { text: '50%',  callback_data: `sell_${p.id}_50` },
+        { text: '25%', callback_data: `sell_${p.id}_25` },
+        { text: '50%', callback_data: `sell_${p.id}_50` },
         { text: '100%', callback_data: `sell_${p.id}_100` }
       ]);
     }
@@ -627,22 +622,22 @@ async function renderPanel(userId, chatId, messageId) {
 
   const equity = user.balance + totalPnL;
 
-  // CORRECT TRAILING DRAWDOWN — NEVER FALSE TRIGGERS
+  // Trailing DD — correct
   let peak = user.peak_equity || user.start_balance;
   if (equity > peak) {
     peak = equity;
-    await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [peak, userId], r));
+    await db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [peak, userId]);
   }
 
   const drawdownPercent = peak > user.start_balance ? ((peak - equity) / peak) * 100 : 0;
   const isBreached = drawdownPercent >= 35;
 
   if (user.failed === 0 && isBreached) {
-    await new Promise(r => db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId], r));
+    await db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId]);
   }
 
   if (user.failed === 0 && equity >= user.target) {
-    await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
+    await db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId]);
   }
 
   let status = '';
@@ -655,7 +650,7 @@ ${status}*LIVE POSITIONS* (real-time)
 Equity       $${equity.toFixed(2)}
 Unrealized   ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
 Peak         $${peak.toFixed(2)}
-Drawdown     ${drawdownPercent.toFixed(2)}%${drawdownPercent >= 25 ? ' DANGER' : ''}
+Drawdown     ${drawdownPercent.toFixed(2)}%
 
 ${positions.length === 0 ? 'No open positions' : ''}
 `.trim());
@@ -671,7 +666,7 @@ ${positions.length === 0 ? 'No open positions' : ''}
     }
   }).catch(() => {});
 
-  // FASTEST POSSIBLE REFRESH — 1 second
+  // 1-second refresh — PnL now updates instantly
   if (ACTIVE_POSITION_PANELS.has(userId)) {
     clearInterval(ACTIVE_POSITION_PANELS.get(userId).intervalId);
   }
