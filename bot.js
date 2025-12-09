@@ -597,7 +597,7 @@ async function renderPanel(userId, chatId, messageId) {
     const live = await getTokenData(p.ca);
 
     const pnlUSD = (live.price - p.entry_price) * p.tokens_bought;
-    const pnlPct = p.entry_price > 0 ? ((live.price - p.entry_price) / p.entry_price) * 100) : 0;
+    const pnlPct = p.entry_price > 0 ? ((live.price - p.entry_price) / p.entry_price) * 100 : 0;
     totalPnL += pnlUSD;
 
     buttons.push([
