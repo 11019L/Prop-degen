@@ -600,27 +600,34 @@ async function renderPanel(userId, chatId, messageId) {
     const pnlPct = p.entry_price > 0 ? ((live.price - p.entry_price) / p.entry_price) * 100 : 0;
     totalPnL += pnlUSD;
 
+    // Each coin completely separate — moves on its own
     buttons.push([
-      { text: `${live.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% ($${pnlUSD.toFixed(2)})`, callback_data: 'noop' },
-      { text: 'View', callback_data: `view_${p.id}` },
-      ...(user.failed === 0 ? [
+      { 
+        text: `${live.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% | $${pnlUSD.toFixed(2)}`, 
+        callback_data: 'noop' 
+      }
+    ]);
+
+    // Sell buttons — only if not failed
+    if (user.failed === 0) {
+      buttons.push([
         { text: '25%', callback_data: `sell_${p.id}_25` },
         { text: '50%', callback_data: `sell_${p.id}_50` },
         { text: '100%', callback_data: `sell_${p.id}_100` }
-      ] : [])
-    ]);
+      ]);
+    }
   }
 
   const equity = user.balance + totalPnL;
 
-  // TRAILING DRAWDOWN — WORKS AT -4%, -20%, ANYTHING
+  // TRAILING DRAWDOWN — CORRECT (only real losses count)
   let peak = user.peak_equity || user.start_balance;
   if (equity > peak) {
     peak = equity;
     await new Promise(r => db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [peak, userId], r));
   }
 
-  const drawdownPercent = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
+  const drawdownPercent = peak > user.start_balance ? ((peak - equity) / peak) * 100 : 0;
   const isBreached = drawdownPercent >= 35;
 
   if (user.failed === 0 && isBreached) {
@@ -631,13 +638,8 @@ async function renderPanel(userId, chatId, messageId) {
     await new Promise(r => db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId], r));
   }
 
-  let ddWarning = '';
-  if (drawdownPercent > 0 && drawdownPercent < 25) ddWarning = '\nLoss detected — watch closely';
-  if (drawdownPercent >= 25 && drawdownPercent < 35) ddWarning = '\nDANGER ZONE — SELL NOW';
-  if (drawdownPercent >= 32) ddWarning = '\nFINAL WARNING — NEXT TICK MAY KILL';
-
   let status = '';
-  if (user.failed === 1) status = '*CHALLENGE FAILED — 35% DRAWDOWN*\n\n';
+  if (user.failed === 1) status = '*CHALLENGE FAILED — 35% DD*\n\n';
   if (user.failed === 2) status = `*PASSED! $${user.bounty} + 100% PROFITS YOURS*\nSend wallet\n\n`;
 
   const text = esc(`
@@ -645,8 +647,8 @@ ${status}*LIVE POSITIONS* (real-time)
 
 Equity       $${equity.toFixed(2)}
 Unrealized   ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
-Peak Equity  $${peak.toFixed(2)}
-Drawdown     ${drawdownPercent.toFixed(2)}%${ddWarning}
+Peak         $${peak.toFixed(2)}
+Drawdown     ${drawdownPercent.toFixed(2)}%${drawdownPercent >= 25 ? ' DANGER' : ''}
 
 ${positions.length === 0 ? 'No open positions' : ''}
 `.trim());
@@ -656,16 +658,15 @@ ${positions.length === 0 ? 'No open positions' : ''}
     reply_markup: {
       inline_keyboard: [
         ...buttons,
+        positions.length > 0 ? [] : [],
         [{ text: 'Refresh', callback_data: 'refresh_pos' }],
-        [{ text: 'Close', callback_data: 'close_pos' }]
+        [{ text: 'Close Panel', callback_data: 'close_pos' }]
       ]
     }
   }).catch(() => {});
 
-  // ULTRA FAST REFRESH — 1.3 seconds always
-  if (ACTIVE_POSITION_PANELS.has(userId)) {
-    clearInterval(ACTIVE_POSITION_PANELS.get(userId).intervalId);
-  }
+  // Ultra-fast refresh
+  if (ACTIVE_POSITION_PANELS.has(userId)) clearInterval(ACTIVE_POSITION_PANELS.get(userId).intervalId);
   const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), 1300);
   ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
 }
