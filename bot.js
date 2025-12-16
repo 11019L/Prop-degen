@@ -83,15 +83,31 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
-  // ONLY DEXSCREENER - Consistent price + real FDV/MC
+  // JUPITER PRIMARY - FASTER & MORE ACCURATE PRICE
+  try {
+    const res = await axios.get(`https://price.jup.ag/v6/price?ids=${ca}`, { timeout: 6000 });
+    const data = res.data.data[ca];
+    if (data && data.price > 0) {
+      return {
+        symbol: ca.slice(0, 8) + '...', // Jupiter doesn't return symbol
+        price: data.price,
+        mc: data.fdMarketCap ? formatMC(data.fdMarketCap) : 'N/A', // Often includes FDV!
+        liquidity: 0,
+        priceChange1h: 0 // Not provided (optional: remove from panel if unused)
+      };
+    }
+  } catch (e) {
+    console.log('Jupiter Price API failed:', e.message);
+  }
+
+  // DEXSCREENER FALLBACK - For MC/liquidity if Jupiter lacks
   try {
     const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
     const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
-                 || res.data.pairs?.find(p => p.quoteToken?.symbol === 'SOL')
                  || res.data.pairs?.[0];
 
     if (pair && pair.priceUsd > 0) {
-      const fdv = pair.fdv || pair.marketCap || 0;
+      const fdv = pair.fdv || 0;
       return {
         symbol: pair.baseToken.symbol || ca.slice(0, 8) + '...',
         price: parseFloat(pair.priceUsd),
@@ -102,23 +118,6 @@ async function getTokenData(ca) {
     }
   } catch (e) {
     console.log('DexScreener failed:', e.message);
-  }
-
-  // Optional: Add Jupiter as backup (very accurate, no MC though)
-  try {
-    const res = await axios.get(`https://price.jup.ag/v6/price?ids=${ca}`, { timeout: 6000 });
-    const data = res.data.data[ca];
-    if (data && data.price > 0) {
-      return {
-        symbol: ca.slice(0, 8) + '...',
-        price: data.price,
-        mc: 'N/A', // Jupiter doesn't provide MC
-        liquidity: 0,
-        priceChange1h: 0
-      };
-    }
-  } catch (e) {
-    console.log('Jupiter Price failed:', e.message);
   }
 
   return { symbol: ca.slice(0, 8) + '...', price: 0, mc: 'Error', liquidity: 0, priceChange1h: 0 };
