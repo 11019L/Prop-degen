@@ -83,12 +83,12 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
-  // Birdeye primary - fast and accurate when key works (no MC in this endpoint, but great price)
+  // Birdeye primary - using correct uppercase header and x-chain
   try {
     const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
       headers: {
-        'X-API-KEY': process.env.BIRDEYE_API_KEY,
-        'x-chain': 'solana',
+        'X-API-KEY': process.env.BIRDEYE_API_KEY,  // Uppercase as per official docs
+        'x-chain': 'solana',                       // Required for multi-chain support
         'accept': 'application/json'
       },
       timeout: 8000
@@ -99,7 +99,7 @@ async function getTokenData(ca) {
       return {
         symbol: d.symbol || ca.slice(0, 8) + '...',
         price: d.value,
-        mc: 'N/A', // This endpoint doesn't provide MC/FDV - we'll get it from DexScreener if needed
+        mc: d.mc ? formatMC(d.mc) : 'N/A',
         liquidity: d.liquidity || 0,
         priceChange1h: d.priceChange?.h1 || 0
       };
@@ -108,7 +108,7 @@ async function getTokenData(ca) {
     console.error('Birdeye failed:', e.response?.status, e.response?.data || e.message);
   }
 
-  // DexScreener backup - adds reliable FDV/MC and liquidity
+  // DexScreener backup - reliable and free
   try {
     const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
     const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
@@ -116,11 +116,10 @@ async function getTokenData(ca) {
                  || res.data.pairs?.[0];
 
     if (pair && pair.priceUsd > 0) {
-      const fdv = pair.fdv || 0;
       return {
         symbol: pair.baseToken.symbol || ca.slice(0, 8) + '...',
         price: parseFloat(pair.priceUsd),
-        mc: fdv > 0 ? formatMC(fdv) : 'N/A',
+        mc: pair.fdv ? formatMC(parseFloat(pair.fdv)) : 'N/A',
         liquidity: parseFloat(pair.liquidity?.usd || 0),
         priceChange1h: parseFloat(pair.priceChange?.h1 || 0)
       };
@@ -129,7 +128,7 @@ async function getTokenData(ca) {
     console.log('DexScreener failed:', e.message);
   }
 
-  // Final fallback
+  // Final safety fallback
   return {
     symbol: ca.slice(0, 8) + '...',
     price: 0,
