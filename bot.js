@@ -83,24 +83,32 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
-  // JUPITER PRICE API PRIMARY — FASTEST, MOST ACCURATE, LOW LATENCY FOR SOLANA (2025 STANDARD)
+  // Birdeye primary - fast and accurate when key works (no MC in this endpoint, but great price)
   try {
-    const res = await axios.get(`https://price.jup.ag/v6/price?ids=${ca}`, { timeout: 6000 });
-    const data = res.data.data[ca];
-    if (data && data.price > 0) {
+    const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
+      headers: {
+        'X-API-KEY': process.env.BIRDEYE_API_KEY,
+        'x-chain': 'solana',
+        'accept': 'application/json'
+      },
+      timeout: 8000
+    });
+
+    if (res.data?.success && res.data.data?.value > 0) {
+      const d = res.data.data;
       return {
-        symbol: ca.slice(0, 8) + '...',
-        price: data.price,
-        mc: data.fdMarketCap ? formatMC(data.fdMarketCap) : 'N/A', // Jupiter often includes FDV/MC!
-        liquidity: 0,
-        priceChange1h: 0 // Not critical; remove from panel display if needed
+        symbol: d.symbol || ca.slice(0, 8) + '...',
+        price: d.value,
+        mc: 'N/A', // This endpoint doesn't provide MC/FDV - we'll get it from DexScreener if needed
+        liquidity: d.liquidity || 0,
+        priceChange1h: d.priceChange?.h1 || 0
       };
     }
   } catch (e) {
-    console.log('Jupiter Price API failed:', e.message);
+    console.error('Birdeye failed:', e.response?.status, e.response?.data || e.message);
   }
 
-  // DEXSCREENER BACKUP — Reliable FDV/MC + liquidity
+  // DexScreener backup - adds reliable FDV/MC and liquidity
   try {
     const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
     const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
@@ -121,33 +129,14 @@ async function getTokenData(ca) {
     console.log('DexScreener failed:', e.message);
   }
 
-  // BIRDEYE FALLBACK — If you have a good key (adds liquidity/symbol if others fail)
-  if (process.env.BIRDEYE_API_KEY) {
-    try {
-      const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
-        headers: {
-          'X-API-KEY': process.env.BIRDEYE_API_KEY,
-          'x-chain': 'solana',
-          'accept': 'application/json'
-        },
-        timeout: 8000
-      });
-      if (res.data?.success && res.data.data?.value > 0) {
-        const d = res.data.data;
-        return {
-          symbol: d.symbol || ca.slice(0, 8) + '...',
-          price: d.value,
-          mc: 'N/A', // Basic price endpoint has no MC
-          liquidity: d.liquidity || 0,
-          priceChange1h: d.priceChange?.h1 || 0
-        };
-      }
-    } catch (e) {
-      console.error('Birdeye fallback failed:', e.response?.status || e.message);
-    }
-  }
-
-  return { symbol: ca.slice(0, 8) + '...', price: 0, mc: 'Error', liquidity: 0, priceChange1h: 0 };
+  // Final fallback
+  return {
+    symbol: ca.slice(0, 8) + '...',
+    price: 0,
+    mc: 'Error',
+    liquidity: 0,
+    priceChange1h: 0
+  };
 }
 
 app.get('/health', (req, res) => res.status(200).send('OK'));
