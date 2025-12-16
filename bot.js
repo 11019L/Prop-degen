@@ -84,12 +84,17 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
-  // Birdeye primary
+  // Birdeye primary - using correct uppercase header and x-chain
   try {
     const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
-      headers: { 'x-api-key': process.env.BIRDEYE_API_KEY },
-      timeout: 6000
+      headers: {
+        'X-API-KEY': process.env.BIRDEYE_API_KEY,  // Uppercase as per official docs
+        'x-chain': 'solana',                       // Required for multi-chain support
+        'accept': 'application/json'
+      },
+      timeout: 8000
     });
+
     if (res.data?.success && res.data.data?.value > 0) {
       const d = res.data.data;
       return {
@@ -100,12 +105,17 @@ async function getTokenData(ca) {
         priceChange1h: d.priceChange?.h1 || 0
       };
     }
-  } catch (e) {}
+  } catch (e) {
+    console.error('Birdeye failed:', e.response?.status, e.response?.data || e.message);
+  }
 
-  // DexScreener backup
+  // DexScreener backup - reliable and free
   try {
-    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 5000 });
-    const pair = res.data.pairs?.find(p => p.quoteToken?.symbol === 'SOL' && p.dexId === 'raydium') || res.data.pairs?.[0];
+    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
+    const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
+                 || res.data.pairs?.find(p => p.quoteToken?.symbol === 'SOL')
+                 || res.data.pairs?.[0];
+
     if (pair && pair.priceUsd > 0) {
       return {
         symbol: pair.baseToken.symbol || ca.slice(0, 8) + '...',
@@ -115,9 +125,18 @@ async function getTokenData(ca) {
         priceChange1h: parseFloat(pair.priceChange?.h1 || 0)
       };
     }
-  } catch (e) {}
+  } catch (e) {
+    console.log('DexScreener failed:', e.message);
+  }
 
-  return { symbol: ca.slice(0, 8) + '...', price: 0, mc: 'Error', liquidity: 0, priceChange1h: 0 };
+  // Final safety fallback
+  return {
+    symbol: ca.slice(0, 8) + '...',
+    price: 0,
+    mc: 'Error',
+    liquidity: 0,
+    priceChange1h: 0
+  };
 }
 
 app.get('/health', (req, res) => res.status(200).send('OK'));
