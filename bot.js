@@ -83,27 +83,28 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
-  // JUPITER PRIMARY - FASTER & MORE ACCURATE PRICE
+  // JUPITER PRICE API PRIMARY — FASTEST, MOST ACCURATE, LOW LATENCY FOR SOLANA (2025 STANDARD)
   try {
     const res = await axios.get(`https://price.jup.ag/v6/price?ids=${ca}`, { timeout: 6000 });
     const data = res.data.data[ca];
     if (data && data.price > 0) {
       return {
-        symbol: ca.slice(0, 8) + '...', // Jupiter doesn't return symbol
+        symbol: ca.slice(0, 8) + '...',
         price: data.price,
-        mc: data.fdMarketCap ? formatMC(data.fdMarketCap) : 'N/A', // Often includes FDV!
+        mc: data.fdMarketCap ? formatMC(data.fdMarketCap) : 'N/A', // Jupiter often includes FDV/MC!
         liquidity: 0,
-        priceChange1h: 0 // Not provided (optional: remove from panel if unused)
+        priceChange1h: 0 // Not critical; remove from panel display if needed
       };
     }
   } catch (e) {
     console.log('Jupiter Price API failed:', e.message);
   }
 
-  // DEXSCREENER FALLBACK - For MC/liquidity if Jupiter lacks
+  // DEXSCREENER BACKUP — Reliable FDV/MC + liquidity
   try {
     const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
     const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
+                 || res.data.pairs?.find(p => p.quoteToken?.symbol === 'SOL')
                  || res.data.pairs?.[0];
 
     if (pair && pair.priceUsd > 0) {
@@ -118,6 +119,32 @@ async function getTokenData(ca) {
     }
   } catch (e) {
     console.log('DexScreener failed:', e.message);
+  }
+
+  // BIRDEYE FALLBACK — If you have a good key (adds liquidity/symbol if others fail)
+  if (process.env.BIRDEYE_API_KEY) {
+    try {
+      const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
+        headers: {
+          'X-API-KEY': process.env.BIRDEYE_API_KEY,
+          'x-chain': 'solana',
+          'accept': 'application/json'
+        },
+        timeout: 8000
+      });
+      if (res.data?.success && res.data.data?.value > 0) {
+        const d = res.data.data;
+        return {
+          symbol: d.symbol || ca.slice(0, 8) + '...',
+          price: d.value,
+          mc: 'N/A', // Basic price endpoint has no MC
+          liquidity: d.liquidity || 0,
+          priceChange1h: d.priceChange?.h1 || 0
+        };
+      }
+    } catch (e) {
+      console.error('Birdeye fallback failed:', e.response?.status || e.message);
+    }
   }
 
   return { symbol: ca.slice(0, 8) + '...', price: 0, mc: 'Error', liquidity: 0, priceChange1h: 0 };
