@@ -84,32 +84,7 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
-  // Birdeye primary - using correct uppercase header and x-chain
-  try {
-    const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
-      headers: {
-        'X-API-KEY': process.env.BIRDEYE_API_KEY,  // Uppercase as per official docs
-        'x-chain': 'solana',                       // Required for multi-chain support
-        'accept': 'application/json'
-      },
-      timeout: 8000
-    });
-
-    if (res.data?.success && res.data.data?.value > 0) {
-      const d = res.data.data;
-      return {
-        symbol: d.symbol || ca.slice(0, 8) + '...',
-        price: d.value,
-        mc: d.mc ? formatMC(d.mc) : 'N/A',
-        liquidity: d.liquidity || 0,
-        priceChange1h: d.priceChange?.h1 || 0
-      };
-    }
-  } catch (e) {
-    console.error('Birdeye failed:', e.response?.status, e.response?.data || e.message);
-  }
-
-  // DexScreener backup - reliable and free
+  // ONLY DEXSCREENER - Consistent price + real FDV/MC
   try {
     const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
     const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
@@ -117,10 +92,11 @@ async function getTokenData(ca) {
                  || res.data.pairs?.[0];
 
     if (pair && pair.priceUsd > 0) {
+      const fdv = pair.fdv || pair.marketCap || 0;
       return {
         symbol: pair.baseToken.symbol || ca.slice(0, 8) + '...',
         price: parseFloat(pair.priceUsd),
-        mc: pair.fdv ? formatMC(parseFloat(pair.fdv)) : 'N/A',
+        mc: fdv > 0 ? formatMC(fdv) : 'N/A',
         liquidity: parseFloat(pair.liquidity?.usd || 0),
         priceChange1h: parseFloat(pair.priceChange?.h1 || 0)
       };
@@ -129,14 +105,24 @@ async function getTokenData(ca) {
     console.log('DexScreener failed:', e.message);
   }
 
-  // Final safety fallback
-  return {
-    symbol: ca.slice(0, 8) + '...',
-    price: 0,
-    mc: 'Error',
-    liquidity: 0,
-    priceChange1h: 0
-  };
+  // Optional: Add Jupiter as backup (very accurate, no MC though)
+  try {
+    const res = await axios.get(`https://price.jup.ag/v6/price?ids=${ca}`, { timeout: 6000 });
+    const data = res.data.data[ca];
+    if (data && data.price > 0) {
+      return {
+        symbol: ca.slice(0, 8) + '...',
+        price: data.price,
+        mc: 'N/A', // Jupiter doesn't provide MC
+        liquidity: 0,
+        priceChange1h: 0
+      };
+    }
+  } catch (e) {
+    console.log('Jupiter Price failed:', e.message);
+  }
+
+  return { symbol: ca.slice(0, 8) + '...', price: 0, mc: 'Error', liquidity: 0, priceChange1h: 0 };
 }
 
 app.get('/health', (req, res) => res.status(200).send('OK'));
