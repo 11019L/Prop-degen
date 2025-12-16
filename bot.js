@@ -22,8 +22,7 @@ const MAX_DRAWDOWN_PERCENT = 35;        // 35%
 const MAX_POSITION_PERCENT = 0.30;      // 30% per trade
 const MAX_TRADES_PER_DAY = 10;          // 10 per day
 const INACTIVITY_HOURS = 48;
-const CASH_BUFFER_PERCENT = 0.05;       // 5% cash buffer
-const PUMP_MAX_1H_PERCENT = 300;        // No >300% pump in 1h
+const CASH_BUFFER_PERCENT = 0.05;       // 5% cash buffer       // No >300% pump in 1h
 
 // Use consistent tiers (paid accounts)
 const TIERS = {
@@ -335,7 +334,6 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
 
   const token = await getTokenData(ca);
   if (!token.price || token.price <= 0) return ctx.editMessageText('Token data unavailable');
-  if (token.priceChange1h > PUMP_MAX_1H_PERCENT) return ctx.editMessageText(`Token pumped >${PUMP_MAX_1H_PERCENT}% in 1h - forbidden`);
 
   let entryPrice = token.price;
   let tokensBought = amountUSD / entryPrice;
