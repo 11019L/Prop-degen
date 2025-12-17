@@ -83,9 +83,9 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
-  // JUPITER PRIMARY — Fast, accurate, free (feels like your old Birdeye speed)
+  // JUPITER PRIMARY — Lowest latency free price feed (2025 best for fast unrealized)
   try {
-    const res = await axios.get(`https://price.jup.ag/v6/price?ids=${ca}`, { timeout: 6000 });
+    const res = await axios.get(`https://price.jup.ag/v6/price?ids=${ca}`, { timeout: 5000 });
     const data = res.data.data[ca];
     if (data && data.price > 0) {
       return {
@@ -100,12 +100,10 @@ async function getTokenData(ca) {
     console.log('Jupiter failed:', e.message);
   }
 
-  // DEXSCREENER BACKUP — MC/FDV + liquidity
+  // DEXSCREENER BACKUP
   try {
-    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
-    const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
-                 || res.data.pairs?.[0];
-
+    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 7000 });
+    const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') || res.data.pairs?.[0];
     if (pair && pair.priceUsd > 0) {
       const fdv = pair.fdv || 0;
       return {
@@ -120,13 +118,7 @@ async function getTokenData(ca) {
     console.log('DexScreener failed:', e.message);
   }
 
-  return {
-    symbol: ca.slice(0, 8) + '...',
-    price: 0,
-    mc: 'Error',
-    liquidity: 0,
-    priceChange1h: 0
-  };
+  return { symbol: ca.slice(0, 8) + '...', price: 0, mc: 'Error', liquidity: 0, priceChange1h: 0 };
 }
 
 app.get('/health', (req, res) => res.status(200).send('OK'));
@@ -463,6 +455,7 @@ setInterval(() => {
 async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update.callback_query.from.id;
   const chatId = ctx.chat?.id || ctx.update.callback_query.message.chat.id;
+  const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), 1000); // 1 second for fastest auto-update
 
   userLastActivity.set(userId, Date.now());
 
