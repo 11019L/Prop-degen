@@ -83,64 +83,77 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
-  let price = 0;
-  let mc = 'N/A';
-  let symbol = ca.slice(0, 8) + '...';
-  let liquidity = 0;
-  let priceChange1h = 0;
-
-  // Birdeye primary - fastest price source (your original setup)
+  // DEXSCREENER PRIMARY — Free, reliable, fast enough for 1s updates, accurate MC/FDV, no key issues
   try {
-    const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
-      headers: {
-        'X-API-KEY': process.env.BIRDEYE_API_KEY,
-        'x-chain': 'solana',
-        'accept': 'application/json'
-      },
-      timeout: 8000
-    });
+    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
+    const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
+                 || res.data.pairs?.find(p => p.quoteToken?.symbol === 'SOL')
+                 || res.data.pairs?.[0];
 
-    if (res.data?.success && res.data.data?.value > 0) {
-      const d = res.data.data;
-      price = d.value;
-      symbol = d.symbol || symbol;
-      liquidity = d.liquidity || liquidity;
-      priceChange1h = d.priceChange?.h1 || priceChange1h;
+    if (pair && pair.priceUsd > 0) {
+      const fdv = pair.fdv || 0;
+      return {
+        symbol: pair.baseToken.symbol || ca.slice(0, 8) + '...',
+        price: parseFloat(pair.priceUsd),
+        mc: fdv > 0 ? formatMC(fdv) : 'N/A',
+        liquidity: parseFloat(pair.liquidity?.usd || 0),
+        priceChange1h: parseFloat(pair.priceChange?.h1 || 0)
+      };
     }
   } catch (e) {
-    console.error('Birdeye failed:', e.response?.status, e.response?.data || e.message);
+    console.log('DexScreener failed:', e.message);
   }
 
-  // ALWAYS get accurate MC/FDV from DexScreener (parallel, no slowdown)
-  // This runs independently - doesn't affect price speed
-  (async () => {
-    try {
-      const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
-      const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
-                   || res.data.pairs?.find(p => p.quoteToken?.symbol === 'SOL')
-                   || res.data.pairs?.[0];
-
-      if (pair && pair.fdv > 0) {
-        mc = formatMC(parseFloat(pair.fdv));
-        // Optional: update symbol/liquidity if better
-        if (pair.baseToken?.symbol) symbol = pair.baseToken.symbol;
-        if (pair.liquidity?.usd) liquidity = parseFloat(pair.liquidity.usd);
-      }
-    } catch (e) {
-      console.log('DexScreener MC fetch failed:', e.message);
+  // JUPITER PRICE API BACKUP — Free, very fast & accurate (official aggregator)
+  try {
+    const res = await axios.get(`https://price.jup.ag/v6/price?ids=${ca}`, { timeout: 6000 });
+    const data = res.data.data[ca];
+    if (data && data.price > 0) {
+      return {
+        symbol: ca.slice(0, 8) + '...',
+        price: data.price,
+        mc: data.fdMarketCap ? formatMC(data.fdMarketCap) : 'N/A',
+        liquidity: 0,
+        priceChange1h: 0
+      };
     }
-  })();
+  } catch (e) {
+    console.log('Jupiter Price API failed:', e.message);
+  }
 
-  // Return immediately with fast Birdeye price (MC will show when ready, or 'N/A')
+  // BIRDEYE ONLY IF YOU FIX YOUR KEY — Comment out if still unavailable
+  // try {
+  //   const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
+  //     headers: {
+  //       'X-API-KEY': process.env.BIRDEYE_API_KEY,
+  //       'x-chain': 'solana',
+  //       'accept': 'application/json'
+  //     },
+  //     timeout: 8000
+  //   });
+  //   if (res.data?.success && res.data.data?.value > 0) {
+  //     const d = res.data.data;
+  //     return {
+  //       symbol: d.symbol || ca.slice(0, 8) + '...',
+  //       price: d.value,
+  //       mc: 'N/A',
+  //       liquidity: d.liquidity || 0,
+  //       priceChange1h: d.priceChange?.h1 || 0
+  //     };
+  //   }
+  // } catch (e) {
+  //   console.error('Birdeye failed:', e.response?.status, e.response?.data || e.message);
+  // }
+
+  // Final fallback
   return {
-    symbol,
-    price,
-    mc, // Starts as 'N/A', updates if DexScreener succeeds (but panel uses current)
-    liquidity,
-    priceChange1h
+    symbol: ca.slice(0, 8) + '...',
+    price: 0,
+    mc: 'Error',
+    liquidity: 0,
+    priceChange1h: 0
   };
 }
-
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
 // Influencer system
