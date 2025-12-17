@@ -83,7 +83,7 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
-  // Birdeye primary - fast price (your original responsive unrealized)
+  // BIRDEYE PRIMARY — Fastest price for smooth, responsive unrealized PnL (your original feel)
   try {
     const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
       headers: {
@@ -91,7 +91,7 @@ async function getTokenData(ca) {
         'x-chain': 'solana',
         'accept': 'application/json'
       },
-      timeout: 8000
+      timeout: 6000  // Faster timeout to avoid hanging
     });
 
     if (res.data?.success && res.data.data?.value > 0) {
@@ -99,7 +99,7 @@ async function getTokenData(ca) {
       return {
         symbol: d.symbol || ca.slice(0, 8) + '...',
         price: d.value,
-        mc: 'N/A',
+        mc: 'N/A', // This endpoint doesn't have MC
         liquidity: d.liquidity || 0,
         priceChange1h: d.priceChange?.h1 || 0
       };
@@ -108,10 +108,13 @@ async function getTokenData(ca) {
     console.error('Birdeye failed:', e.response?.status || e.message);
   }
 
-  // DexScreener backup - for MC and fallback price
+  // DEXSCREENER BACKUP — Only used if Birdeye fails (keeps speed high, adds real MC)
   try {
-    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
-    const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') || res.data.pairs?.[0];
+    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 7000 });
+    const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
+                 || res.data.pairs?.find(p => p.quoteToken?.symbol === 'SOL')
+                 || res.data.pairs?.[0];
+
     if (pair && pair.priceUsd > 0) {
       const fdv = pair.fdv || 0;
       return {
@@ -126,7 +129,14 @@ async function getTokenData(ca) {
     console.log('DexScreener failed:', e.message);
   }
 
-  return { symbol: ca.slice(0, 8) + '...', price: 0, mc: 'Error', liquidity: 0, priceChange1h: 0 };
+  // Final fallback
+  return {
+    symbol: ca.slice(0, 8) + '...',
+    price: 0,
+    mc: 'Error',
+    liquidity: 0,
+    priceChange1h: 0
+  };
 }
 
 app.get('/health', (req, res) => res.status(200).send('OK'));
