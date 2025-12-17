@@ -396,7 +396,6 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
 
   const token = await getTokenData(ca);
   if (!token.price || token.price <= 0) return ctx.editMessageText('Token data unavailable');
-  if (token.liquidity < MIN_LIQUIDITY_USD) return ctx.editMessageText(`Liquidity too low ($${token.liquidity.toFixed(0)} < $${MIN_LIQUIDITY_USD})`);
 
   let entryPrice = token.price;
   let tokensBought = amountUSD / entryPrice;
