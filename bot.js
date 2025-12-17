@@ -5,7 +5,7 @@ const axios = require('axios');
 const sqlite3 = require('sqlite3').verbose();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
-bot.use(session()); // Required for ctx.session
+bot.use(session());
 
 const app = express();
 app.use(express.json());
@@ -15,16 +15,15 @@ db.exec('PRAGMA journal_mode = WAL;');
 
 const ADMIN_ID = Number(process.env.ADMIN_ID);
 const ACTIVE_POSITION_PANELS = new Map();
-const userLastActivity = new Map(); // Use Map for better performance
+const userLastActivity = new Map();
 
-// Updated rules as per request
-const MAX_DRAWDOWN_PERCENT = 35;        // 35%
-const MAX_POSITION_PERCENT = 0.30;      // 30% per trade
-const MAX_TRADES_PER_DAY = 10;          // 10 per day
+const MAX_DRAWDOWN_PERCENT = 35;
+const MAX_POSITION_PERCENT = 0.30;
+const MAX_TRADES_PER_DAY = 10;
 const INACTIVITY_HOURS = 48;
-const CASH_BUFFER_PERCENT = 0.05;       // 5% cash buffer       // No >300% pump in 1h
+const CASH_BUFFER_PERCENT = 0.05;
+const MIN_LIQUIDITY_USD = 5000; // Reject buys if liquidity too low
 
-// Use consistent tiers (paid accounts)
 const TIERS = {
   20: { balance: 200, target: 500, bounty: 220 },
   30: { balance: 300, target: 750, bounty: 330 },
@@ -69,7 +68,6 @@ db.serialize(() => {
   )`);
 });
 
-// Safe ALTER (ignore errors)
 db.run(`ALTER TABLE users ADD COLUMN peak_equity REAL`, () => {});
 db.run(`ALTER TABLE users ADD COLUMN entry_fee REAL`, () => {});
 db.run(`ALTER TABLE users ADD COLUMN created_at INTEGER`, () => {});
@@ -83,7 +81,6 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
-  // BIRDEYE PRIMARY — Fastest price for smooth, responsive unrealized PnL (your original feel)
   try {
     const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
       headers: {
@@ -91,7 +88,7 @@ async function getTokenData(ca) {
         'x-chain': 'solana',
         'accept': 'application/json'
       },
-      timeout: 6000  // Faster timeout to avoid hanging
+      timeout: 6000
     });
 
     if (res.data?.success && res.data.data?.value > 0) {
@@ -99,7 +96,7 @@ async function getTokenData(ca) {
       return {
         symbol: d.symbol || ca.slice(0, 8) + '...',
         price: d.value,
-        mc: 'N/A', // This endpoint doesn't have MC
+        mc: 'N/A',
         liquidity: d.liquidity || 0,
         priceChange1h: d.priceChange?.h1 || 0
       };
@@ -108,10 +105,9 @@ async function getTokenData(ca) {
     console.error('Birdeye failed:', e.response?.status || e.message);
   }
 
-  // DEXSCREENER BACKUP — Only used if Birdeye fails (keeps speed high, adds real MC)
   try {
     const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 7000 });
-    const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
+    const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL')
                  || res.data.pairs?.find(p => p.quoteToken?.symbol === 'SOL')
                  || res.data.pairs?.[0];
 
@@ -129,7 +125,6 @@ async function getTokenData(ca) {
     console.log('DexScreener failed:', e.message);
   }
 
-  // Final fallback
   return {
     symbol: ca.slice(0, 8) + '...',
     price: 0,
@@ -139,9 +134,44 @@ async function getTokenData(ca) {
   };
 }
 
+// Helper: Get current SOL price for better Jupiter simulation
+async function getSolPrice() {
+  try {
+    const res = await axios.get('https://public-api.birdeye.so/defi/price?address=So11111111111111111111111111111111111111112', {
+      headers: { 'X-API-KEY': process.env.BIRDEYE_API_KEY },
+      timeout: 5000
+    });
+    return res.data.data?.value || 150; // fallback
+  } catch {
+    return 150;
+  }
+}
+
+// Helper: Realistic sell quote via Jupiter
+async function getSellQuote(ca, tokensToSell, tokenDecimals = 9) {
+  try {
+    const amount = Math.round(tokensToSell * Math.pow(10, tokenDecimals));
+    const res = await axios.get('https://quote-api.jup.ag/v6/quote', {
+      params: {
+        inputMint: ca,
+        outputMint: 'So11111111111111111111111111111111111111112',
+        amount,
+        slippageBps: 300 // 3% for realistic estimate
+      },
+      timeout: 6000
+    });
+    if (res.data?.outAmount) {
+      return Number(res.data.outAmount) / 1e9; // SOL received
+    }
+  } catch (e) {
+    console.log('Jupiter sell quote failed:', e.message);
+  }
+  return null;
+}
+
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
-// Influencer system
+// === Influencer & Start Handlers (unchanged) ===
 bot.command('generate_code', async ctx => {
   if (ctx.from.id !== ADMIN_ID) return ctx.reply('Admin only');
   const code = Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -165,7 +195,6 @@ bot.command('influencer', async ctx => {
   ctx.replyWithMarkdownV2(esc(msg));
 });
 
-// /start - fixed (only one handler)
 bot.start(async ctx => {
   const payload = ctx.startPayload || '';
 
@@ -187,7 +216,7 @@ bot.start(async ctx => {
 
   if (payload === 'free200') {
     const userId = ctx.from.id;
-    const tier = TIERS[20]; // Use same as $20 paid tier
+    const tier = TIERS[20];
 
     await new Promise(r => db.run(`
       INSERT OR REPLACE INTO users 
@@ -214,12 +243,10 @@ bot.action('rules', ctx => ctx.replyWithMarkdownV2(esc(`
 • Max drawdown: *${MAX_DRAWDOWN_PERCENT}%* trailing
 • Max position: *${MAX_POSITION_PERCENT * 100}%* of account
 • Max ${MAX_TRADES_PER_DAY} trades per day
-• No coin with >${PUMP_MAX_1H_PERCENT}% pump in last hour
 • Inactivity 48h → account lost
 • Payout within 5 hours of passing
 `.trim())));
 
-// Paid account creation webhook
 app.post('/create-funded-wallet', async (req, res) => {
   try {
     const { userId, payAmount, referralCode } = req.body;
@@ -268,7 +295,7 @@ Paste any Solana CA to buy
   }
 });
 
-// Admin commands
+// Admin commands (unchanged)
 bot.command('admin_test', async ctx => {
   if (ctx.from.id !== ADMIN_ID) return;
   const pay = Number(ctx.message.text.split(' ')[1]);
@@ -304,16 +331,14 @@ bot.command('adminstats', async ctx => {
   ctx.replyWithMarkdownV2(esc(msg));
 });
 
-// Positions command
 bot.command('positions', async ctx => {
   const exists = await new Promise(r => db.get('SELECT 1 FROM users WHERE user_id = ? AND paid = 1', [ctx.from.id], (_, row) => r(!!row)));
   if (!exists && ctx.from.id !== ADMIN_ID) return ctx.reply('No active challenge');
   await showPositions(ctx);
 });
 
-// Buy flow
 async function handleBuy(ctx, ca) {
-  const user = await new Promise(r => db.get('SELECT balance FROM users WHERE user_id = ? AND paid = 1', [ctx.from.id], (_, row) => r(row)));
+  const user = await new Promise(r => db.get('SELECT balance, start_balance FROM users WHERE user_id = ? AND paid = 1', [ctx.from.id], (_, row) => r(row)));
   if (!user) return ctx.reply('No active challenge');
 
   ctx.replyWithMarkdownV2(esc(`How much to buy?\nAvailable: $${user.balance.toFixed(2)}`), {
@@ -345,27 +370,30 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
   const tradesToday = await new Promise(r => db.get('SELECT COUNT(*) as c FROM positions WHERE user_id = ? AND DATE(created_at/1000,"unixepoch") = ?', [userId, today], (_, row) => r(row?.c || 0)));
   if (tradesToday >= MAX_TRADES_PER_DAY) return ctx.editMessageText(`Max ${MAX_TRADES_PER_DAY} trades per day`);
 
-  await ctx.editMessageText('Sniping...');
+  await ctx.editMessageText('Fetching token data...');
 
   const token = await getTokenData(ca);
   if (!token.price || token.price <= 0) return ctx.editMessageText('Token data unavailable');
+  if (token.liquidity < MIN_LIQUIDITY_USD) return ctx.editMessageText(`Liquidity too low ($${token.liquidity.toFixed(0)} < $${MIN_LIQUIDITY_USD})`);
 
   let entryPrice = token.price;
   let tokensBought = amountUSD / entryPrice;
 
-  // Jupiter quote for better accuracy
+  // Better buy simulation with current SOL price
+  const solPrice = await getSolPrice();
   try {
+    const solAmount = amountUSD / solPrice;
     const quote = await axios.get('https://quote-api.jup.ag/v6/quote', {
       params: {
         inputMint: 'So11111111111111111111111111111111111111112',
         outputMint: ca,
-        amount: Math.max(Math.round((amountUSD / 150) * 1e9), 10000000), // Approx SOL price, acceptable for sim
+        amount: Math.round(solAmount * 1e9),
         slippageBps: 1000
       },
       timeout: 7000
     });
     if (quote.data?.outAmount) {
-      tokensBought = Number(quote.data.outAmount) / 1e9;
+      tokensBought = Number(quote.data.outAmount) / Math.pow(10, 9); // assume 9 decimals
       entryPrice = amountUSD / tokensBought;
     }
   } catch (e) {}
@@ -388,6 +416,7 @@ Size: $${amountUSD}
 Tokens: ${tokensBought.toLocaleString(undefined, {maximumFractionDigits: 0})}
 Entry: $${entryPrice.toFixed(12)}
 MC: ${token.mc}
+Liquidity: $${token.liquidity.toFixed(0)}
 
 Remaining: $${(user.balance - amountUSD).toFixed(2)}
   `.trim()), {
@@ -396,7 +425,6 @@ Remaining: $${(user.balance - amountUSD).toFixed(2)}
   });
 });
 
-// Custom amount - fixed (no callAction)
 bot.action(/custom\|(.+)/, async ctx => {
   await ctx.answerCbQuery();
   ctx.session.ca = ctx.match[1];
@@ -408,7 +436,6 @@ bot.on('text', async ctx => {
     const amount = Number(ctx.message.text);
     delete ctx.session.ca;
     if (amount > 0) {
-      // Simulate callback
       const fakeCtx = { ...ctx, match: ['', ctx.session?.ca || '', amount], answerCbQuery: () => {}, editMessageText: ctx.replyWithMarkdownV2.bind(ctx) };
       await bot.action(/buy\|(.+)\|(.+)/).callback(fakeCtx);
     }
@@ -418,26 +445,32 @@ bot.on('text', async ctx => {
   if (/^[1-9A-HJ-NP-Za-km-z]{32,48}$/i.test(text)) await handleBuy(ctx, text);
 });
 
-// Sell
+// === SELL WITH REALISTIC PROCEEDS ===
 bot.action(/sell_(\d+)_(\d+)/, async ctx => {
   try { await ctx.answerCbQuery(); } catch {}
   const posId = ctx.match[1];
   const percent = Number(ctx.match[2]);
   const userId = ctx.from.id;
 
-  const user = await new Promise(r => db.get('SELECT failed FROM users WHERE user_id = ?', [userId], (_, row) => r(row)));
+  const user = await new Promise(r => db.get('SELECT failed, balance FROM users WHERE user_id = ?', [userId], (_, row) => r(row)));
   if (user?.failed !== 0) return;
 
   const pos = await new Promise(r => db.get('SELECT * FROM positions WHERE id = ? AND user_id = ?', [posId, userId], (_, row) => r(row)));
   if (!pos) return;
 
   const live = await getTokenData(pos.ca);
-  const price = live.price > 0 ? live.price : pos.entry_price * 0.01;
+  const currentPrice = live.price > 0 ? live.price : pos.entry_price * 0.01;
 
   const tokensToSell = pos.tokens_bought * (percent / 100);
-  const proceeds = tokensToSell * price;
-  const pnl = (price - pos.entry_price) * tokensToSell;
 
+  // Get realistic sell quote
+  const solReceived = await getSellQuote(pos.ca, tokensToSell);
+  const proceeds = solReceived ? solReceived * currentPrice : tokensToSell * currentPrice;
+
+  const originalCost = pos.amount_usd * (percent / 100);
+  const pnl = proceeds - originalCost;
+
+  // Update balance
   await new Promise(r => db.run('UPDATE users SET balance = balance + ? WHERE user_id = ?', [proceeds, userId], r));
 
   if (percent === 100) {
@@ -451,7 +484,7 @@ bot.action(/sell_(\d+)_(\d+)/, async ctx => {
 *SOLD ${percent}%*
 
 ${live.symbol}
-Proceeds: $${proceeds.toFixed(2)}
+Proceeds: $${proceeds.toFixed(2)}${solReceived ? '' : ' *(estimate)*'}
 PnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}
   `.trim()));
 
@@ -469,11 +502,10 @@ setInterval(() => {
   }
 }, 6 * 3600000);
 
-// Positions panel - optimized
+// === OPTIMIZED POSITIONS PANEL WITH PARALLEL FETCH ===
 async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update.callback_query.from.id;
   const chatId = ctx.chat?.id || ctx.update.callback_query.message.chat.id;
-  
 
   userLastActivity.set(userId, Date.now());
 
@@ -490,7 +522,7 @@ async function showPositions(ctx) {
 
   await renderPanel(userId, chatId, messageId);
 
-  const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), 1000); // Faster but stable
+  const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), 1000);
   ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
 }
 
@@ -505,22 +537,28 @@ async function renderPanel(userId, chatId, messageId) {
   let totalPnL = 0;
   const buttons = [];
 
-  for (const p of positions) {
-    const live = await getTokenData(p.ca);
-    const price = live.price > 0 ? live.price : p.entry_price * 0.01;
-    const pnlUSD = (price - p.entry_price) * p.tokens_bought;
-    const pnlPct = p.entry_price > 0 ? ((price - p.entry_price) / p.entry_price) * 100 : 0;
+  if (positions.length > 0) {
+    // 🔥 PARALLEL PRICE FETCH
+    const liveDataPromises = positions.map(p => getTokenData(p.ca));
+    const liveDataArray = await Promise.all(liveDataPromises);
 
-    totalPnL += pnlUSD;
+    positions.forEach((p, i) => {
+      const live = liveDataArray[i];
+      const price = live.price > 0 ? live.price : p.entry_price * 0.01;
+      const pnlUSD = (price - p.entry_price) * p.tokens_bought;
+      const pnlPct = p.entry_price > 0 ? ((price - p.entry_price) / p.entry_price) * 100 : 0;
 
-    buttons.push([{ text: `${live.symbol}${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% | $${pnlUSD.toFixed(2)}`, callback_data: 'noop' }]);
-    if (user.failed === 0) {
-      buttons.push([
-        { text: '25%', callback_data: `sell_${p.id}_25` },
-        { text: '50%', callback_data: `sell_${p.id}_50` },
-        { text: '100%', callback_data: `sell_${p.id}_100` }
-      ]);
-    }
+      totalPnL += pnlUSD;
+
+      buttons.push([{ text: `${live.symbol}${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% | $${pnlUSD.toFixed(2)}`, callback_data: 'noop' }]);
+      if (user.failed === 0) {
+        buttons.push([
+          { text: '25%', callback_data: `sell_${p.id}_25` },
+          { text: '50%', callback_data: `sell_${p.id}_50` },
+          { text: '100%', callback_data: `sell_${p.id}_100` }
+        ]);
+      }
+    });
   }
 
   const equity = user.balance + totalPnL;
@@ -577,7 +615,6 @@ bot.action('close_pos', async ctx => {
   await ctx.deleteMessage();
 });
 
-// Launch
 bot.launch();
 app.listen(process.env.PORT || 3000, () => console.log('Crucible Bot Running'));
 
