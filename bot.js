@@ -83,27 +83,38 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
-  // JUPITER PRIMARY — Lowest latency free price feed (2025 best for fast unrealized)
+  // BIRDEYE PRIMARY — Your fast, accurate price source (what made unrealized feel perfect before)
   try {
-    const res = await axios.get(`https://price.jup.ag/v6/price?ids=${ca}`, { timeout: 5000 });
-    const data = res.data.data[ca];
-    if (data && data.price > 0) {
+    const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
+      headers: {
+        'X-API-KEY': process.env.BIRDEYE_API_KEY,  // Uppercase X-API-KEY as required
+        'x-chain': 'solana',                       // Required for Solana tokens
+        'accept': 'application/json'
+      },
+      timeout: 8000
+    });
+
+    if (res.data?.success && res.data.data?.value > 0) {
+      const d = res.data.data;
       return {
-        symbol: ca.slice(0, 8) + '...',
-        price: data.price,
-        mc: data.fdMarketCap ? formatMC(data.fdMarketCap) : 'N/A',
-        liquidity: 0,
-        priceChange1h: 0
+        symbol: d.symbol || ca.slice(0, 8) + '...',
+        price: d.value,
+        mc: 'N/A', // This endpoint doesn't return MC/FDV
+        liquidity: d.liquidity || 0,
+        priceChange1h: d.priceChange?.h1 || 0
       };
     }
   } catch (e) {
-    console.log('Jupiter failed:', e.message);
+    console.error('Birdeye failed:', e.response?.status, e.response?.data || e.message);
   }
 
-  // DEXSCREENER BACKUP
+  // DEXSCREENER FALLBACK — Gets price + real MC/FDV if Birdeye fails (rare with working key)
   try {
-    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 7000 });
-    const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') || res.data.pairs?.[0];
+    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
+    const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
+                 || res.data.pairs?.find(p => p.quoteToken?.symbol === 'SOL')
+                 || res.data.pairs?.[0];
+
     if (pair && pair.priceUsd > 0) {
       const fdv = pair.fdv || 0;
       return {
@@ -118,7 +129,14 @@ async function getTokenData(ca) {
     console.log('DexScreener failed:', e.message);
   }
 
-  return { symbol: ca.slice(0, 8) + '...', price: 0, mc: 'Error', liquidity: 0, priceChange1h: 0 };
+  // Final safety fallback
+  return {
+    symbol: ca.slice(0, 8) + '...',
+    price: 0,
+    mc: 'Error',
+    liquidity: 0,
+    priceChange1h: 0
+  };
 }
 
 app.get('/health', (req, res) => res.status(200).send('OK'));
