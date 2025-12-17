@@ -455,7 +455,7 @@ setInterval(() => {
 async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update.callback_query.from.id;
   const chatId = ctx.chat?.id || ctx.update.callback_query.message.chat.id;
-  const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), 1000); // 1 second for fastest auto-update
+  
 
   userLastActivity.set(userId, Date.now());
 
@@ -472,7 +472,7 @@ async function showPositions(ctx) {
 
   await renderPanel(userId, chatId, messageId);
 
-  const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), 1500); // Faster but stable
+  const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), 1000); // Faster but stable
   ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
 }
 
