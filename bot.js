@@ -83,59 +83,49 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
-  let price = 0;
-  let symbol = ca.slice(0, 8) + '...';
-  let liquidity = 0;
-  let priceChange1h = 0;
-  let mc = 'N/A';
-
-  // BIRDEYE PRIMARY — Fastest price for unrealized PnL + exact same price used on sell
+  // JUPITER PRIMARY — Fast, accurate, free (feels like your old Birdeye speed)
   try {
-    const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
-      headers: {
-        'X-API-KEY': process.env.BIRDEYE_API_KEY,
-        'x-chain': 'solana',
-        'accept': 'application/json'
-      },
-      timeout: 8000
-    });
-
-    if (res.data?.success && res.data.data?.value > 0) {
-      const d = res.data.data;
-      price = d.value;
-      symbol = d.symbol || symbol;
-      liquidity = d.liquidity || liquidity;
-      priceChange1h = d.priceChange?.h1 || priceChange1h;
+    const res = await axios.get(`https://price.jup.ag/v6/price?ids=${ca}`, { timeout: 6000 });
+    const data = res.data.data[ca];
+    if (data && data.price > 0) {
+      return {
+        symbol: ca.slice(0, 8) + '...',
+        price: data.price,
+        mc: data.fdMarketCap ? formatMC(data.fdMarketCap) : 'N/A',
+        liquidity: 0,
+        priceChange1h: 0
+      };
     }
   } catch (e) {
-    console.error('Birdeye failed:', e.response?.status, e.response?.data || e.message);
+    console.log('Jupiter failed:', e.message);
   }
 
-  // DEXSCREENER ONLY FOR MC/FDV — Runs in parallel (fire-and-forget), doesn't affect price speed
-  if (price > 0) { // Only fetch MC if we have a valid price from Birdeye
-    axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 })
-      .then(res => {
-        const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
-                     || res.data.pairs?.find(p => p.quoteToken?.symbol === 'SOL')
-                     || res.data.pairs?.[0];
-        if (pair && pair.fdv > 0) {
-          mc = formatMC(parseFloat(pair.fdv));
-          // Optional: better symbol if Birdeye didn't give one
-          if (pair.baseToken?.symbol && symbol.includes('...')) {
-            symbol = pair.baseToken.symbol;
-          }
-        }
-      })
-      .catch(e => console.log('DexScreener MC fetch failed:', e.message));
+  // DEXSCREENER BACKUP — MC/FDV + liquidity
+  try {
+    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
+    const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
+                 || res.data.pairs?.[0];
+
+    if (pair && pair.priceUsd > 0) {
+      const fdv = pair.fdv || 0;
+      return {
+        symbol: pair.baseToken.symbol || ca.slice(0, 8) + '...',
+        price: parseFloat(pair.priceUsd),
+        mc: fdv > 0 ? formatMC(fdv) : 'N/A',
+        liquidity: parseFloat(pair.liquidity?.usd || 0),
+        priceChange1h: parseFloat(pair.priceChange?.h1 || 0)
+      };
+    }
+  } catch (e) {
+    console.log('DexScreener failed:', e.message);
   }
 
-  // Return immediately with Birdeye price (unrealized + sell use this exact price)
   return {
-    symbol,
-    price,
-    mc, // Shows real MC after DexScreener finishes (or 'N/A')
-    liquidity,
-    priceChange1h
+    symbol: ca.slice(0, 8) + '...',
+    price: 0,
+    mc: 'Error',
+    liquidity: 0,
+    priceChange1h: 0
   };
 }
 
