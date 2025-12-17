@@ -16,6 +16,7 @@ db.exec('PRAGMA journal_mode = WAL;');
 const ADMIN_ID = Number(process.env.ADMIN_ID);
 const ACTIVE_POSITION_PANELS = new Map();
 const userLastActivity = new Map();
+const priceCache = new Map(); // ca -> { data, timestamp }
 
 const MAX_DRAWDOWN_PERCENT = 35;
 const MAX_POSITION_PERCENT = 0.30;
@@ -81,6 +82,22 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
+  const now = Date.now();
+  const cached = priceCache.get(ca);
+
+  // Return cached data if it's less than 3 seconds old
+  if (cached && now - cached.timestamp < 3000) {
+    return cached.data;
+  }
+
+  let result = {
+    symbol: ca.slice(0, 8) + '...',
+    price: 0,
+    mc: 'Error',
+    liquidity: 0,
+    priceChange1h: 0
+  };
+
   try {
     const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
       headers: {
@@ -93,18 +110,23 @@ async function getTokenData(ca) {
 
     if (res.data?.success && res.data.data?.value > 0) {
       const d = res.data.data;
-      return {
+      result = {
         symbol: d.symbol || ca.slice(0, 8) + '...',
         price: d.value,
         mc: 'N/A',
         liquidity: d.liquidity || 0,
         priceChange1h: d.priceChange?.h1 || 0
       };
+
+      // Cache only if we got good data from Birdeye
+      priceCache.set(ca, { data: result, timestamp: now });
+      return result;
     }
   } catch (e) {
     console.error('Birdeye failed:', e.response?.status || e.message);
   }
 
+  // Fallback to DexScreener
   try {
     const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 7000 });
     const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL')
@@ -113,25 +135,25 @@ async function getTokenData(ca) {
 
     if (pair && pair.priceUsd > 0) {
       const fdv = pair.fdv || 0;
-      return {
+      result = {
         symbol: pair.baseToken.symbol || ca.slice(0, 8) + '...',
         price: parseFloat(pair.priceUsd),
         mc: fdv > 0 ? formatMC(fdv) : 'N/A',
         liquidity: parseFloat(pair.liquidity?.usd || 0),
         priceChange1h: parseFloat(pair.priceChange?.h1 || 0)
       };
+
+      // Also cache DexScreener results
+      priceCache.set(ca, { data: result, timestamp: now });
+      return result;
     }
   } catch (e) {
     console.log('DexScreener failed:', e.message);
   }
 
-  return {
-    symbol: ca.slice(0, 8) + '...',
-    price: 0,
-    mc: 'Error',
-    liquidity: 0,
-    priceChange1h: 0
-  };
+  // Only reach here if both APIs failed → return error fallback
+  // Do NOT cache failures (so we retry fresh next time)
+  return result;
 }
 
 // Helper: Get current SOL price for better Jupiter simulation
@@ -522,7 +544,7 @@ async function showPositions(ctx) {
 
   await renderPanel(userId, chatId, messageId);
 
-  const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), 1000);
+  const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), 2000);
   ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
 }
 
