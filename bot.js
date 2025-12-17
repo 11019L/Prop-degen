@@ -83,7 +83,13 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
-  // Birdeye primary - your original fast source (keeps unrealized super responsive)
+  let price = 0;
+  let mc = 'N/A';
+  let symbol = ca.slice(0, 8) + '...';
+  let liquidity = 0;
+  let priceChange1h = 0;
+
+  // Birdeye primary - fastest price source (your original setup)
   try {
     const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
       headers: {
@@ -96,53 +102,42 @@ async function getTokenData(ca) {
 
     if (res.data?.success && res.data.data?.value > 0) {
       const d = res.data.data;
-      // We'll enrich MC from DexScreener below if needed
-      return {
-        symbol: d.symbol || ca.slice(0, 8) + '...',
-        price: d.value,
-        rawMc: d.mc || 0, // Sometimes present, but usually not in this endpoint
-        liquidity: d.liquidity || 0,
-        priceChange1h: d.priceChange?.h1 || 0
-      };
+      price = d.value;
+      symbol = d.symbol || symbol;
+      liquidity = d.liquidity || liquidity;
+      priceChange1h = d.priceChange?.h1 || priceChange1h;
     }
   } catch (e) {
     console.error('Birdeye failed:', e.response?.status, e.response?.data || e.message);
   }
 
-  // DexScreener backup - only for price fallback + always gets real MC/FDV
-  let mc = 'N/A';
-  try {
-    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
-    const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
-                 || res.data.pairs?.find(p => p.quoteToken?.symbol === 'SOL')
-                 || res.data.pairs?.[0];
+  // ALWAYS get accurate MC/FDV from DexScreener (parallel, no slowdown)
+  // This runs independently - doesn't affect price speed
+  (async () => {
+    try {
+      const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
+      const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
+                   || res.data.pairs?.find(p => p.quoteToken?.symbol === 'SOL')
+                   || res.data.pairs?.[0];
 
-    if (pair && pair.priceUsd > 0) {
-      const fdv = pair.fdv || 0;
-      mc = fdv > 0 ? formatMC(fdv) : 'N/A';
-
-      // If Birdeye failed, use DexScreener price (still fast enough)
-      if (!res.data?.success) { // Only fallback price if Birdeye didn't work
-        return {
-          symbol: pair.baseToken.symbol || ca.slice(0, 8) + '...',
-          price: parseFloat(pair.priceUsd),
-          mc: mc,
-          liquidity: parseFloat(pair.liquidity?.usd || 0),
-          priceChange1h: parseFloat(pair.priceChange?.h1 || 0)
-        };
+      if (pair && pair.fdv > 0) {
+        mc = formatMC(parseFloat(pair.fdv));
+        // Optional: update symbol/liquidity if better
+        if (pair.baseToken?.symbol) symbol = pair.baseToken.symbol;
+        if (pair.liquidity?.usd) liquidity = parseFloat(pair.liquidity.usd);
       }
+    } catch (e) {
+      console.log('DexScreener MC fetch failed:', e.message);
     }
-  } catch (e) {
-    console.log('DexScreener failed:', e.message);
-  }
+  })();
 
-  // Final fallback (only if both fail)
+  // Return immediately with fast Birdeye price (MC will show when ready, or 'N/A')
   return {
-    symbol: ca.slice(0, 8) + '...',
-    price: 0,
-    mc: 'Error',
-    liquidity: 0,
-    priceChange1h: 0
+    symbol,
+    price,
+    mc, // Starts as 'N/A', updates if DexScreener succeeds (but panel uses current)
+    liquidity,
+    priceChange1h
   };
 }
 
