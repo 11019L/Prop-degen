@@ -83,7 +83,24 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
-  // DEXSCREENER PRIMARY — Free, reliable, fast enough for 1s updates, accurate MC/FDV, no key issues
+  // JUPITER PRIMARY — Fastest low-latency price (2025 gold standard for memecoins)
+  try {
+    const res = await axios.get(`https://price.jup.ag/v6/price?ids=${ca}`, { timeout: 6000 });
+    const data = res.data.data[ca];
+    if (data && data.price > 0) {
+      return {
+        symbol: ca.slice(0, 8) + '...',
+        price: data.price,
+        mc: data.fdMarketCap ? formatMC(data.fdMarketCap) : 'N/A', // Jupiter often provides FDV/MC!
+        liquidity: 0,
+        priceChange1h: 0
+      };
+    }
+  } catch (e) {
+    console.log('Jupiter Price API failed:', e.message);
+  }
+
+  // DEXSCREENER BACKUP — Reliable MC/FDV + liquidity
   try {
     const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
     const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
@@ -104,47 +121,6 @@ async function getTokenData(ca) {
     console.log('DexScreener failed:', e.message);
   }
 
-  // JUPITER PRICE API BACKUP — Free, very fast & accurate (official aggregator)
-  try {
-    const res = await axios.get(`https://price.jup.ag/v6/price?ids=${ca}`, { timeout: 6000 });
-    const data = res.data.data[ca];
-    if (data && data.price > 0) {
-      return {
-        symbol: ca.slice(0, 8) + '...',
-        price: data.price,
-        mc: data.fdMarketCap ? formatMC(data.fdMarketCap) : 'N/A',
-        liquidity: 0,
-        priceChange1h: 0
-      };
-    }
-  } catch (e) {
-    console.log('Jupiter Price API failed:', e.message);
-  }
-
-  // BIRDEYE ONLY IF YOU FIX YOUR KEY — Comment out if still unavailable
-  // try {
-  //   const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
-  //     headers: {
-  //       'X-API-KEY': process.env.BIRDEYE_API_KEY,
-  //       'x-chain': 'solana',
-  //       'accept': 'application/json'
-  //     },
-  //     timeout: 8000
-  //   });
-  //   if (res.data?.success && res.data.data?.value > 0) {
-  //     const d = res.data.data;
-  //     return {
-  //       symbol: d.symbol || ca.slice(0, 8) + '...',
-  //       price: d.value,
-  //       mc: 'N/A',
-  //       liquidity: d.liquidity || 0,
-  //       priceChange1h: d.priceChange?.h1 || 0
-  //     };
-  //   }
-  // } catch (e) {
-  //   console.error('Birdeye failed:', e.response?.status, e.response?.data || e.message);
-  // }
-
   // Final fallback
   return {
     symbol: ca.slice(0, 8) + '...',
@@ -154,6 +130,7 @@ async function getTokenData(ca) {
     priceChange1h: 0
   };
 }
+
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
 // Influencer system
