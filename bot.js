@@ -83,15 +83,15 @@ function formatMC(marketCap) {
 }
 
 async function getTokenData(ca) {
-  // BIRDEYE PRIMARY — Your fast, accurate price source (what made unrealized feel perfect before)
+  // BIRDEYE PRIMARY — Your fast price source (unrealized updates feel responsive)
   try {
     const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
       headers: {
-        'X-API-KEY': process.env.BIRDEYE_API_KEY,  // Uppercase X-API-KEY as required
-        'x-chain': 'solana',                       // Required for Solana tokens
+        'X-API-KEY': process.env.BIRDEYE_API_KEY,  // Confirmed uppercase
+        'x-chain': 'solana',
         'accept': 'application/json'
       },
-      timeout: 8000
+      timeout: 6000  // Lower timeout for faster failure/fallback
     });
 
     if (res.data?.success && res.data.data?.value > 0) {
@@ -99,22 +99,36 @@ async function getTokenData(ca) {
       return {
         symbol: d.symbol || ca.slice(0, 8) + '...',
         price: d.value,
-        mc: 'N/A', // This endpoint doesn't return MC/FDV
+        mc: 'N/A', // Price endpoint doesn't have MC
         liquidity: d.liquidity || 0,
         priceChange1h: d.priceChange?.h1 || 0
       };
     }
   } catch (e) {
-    console.error('Birdeye failed:', e.response?.status, e.response?.data || e.message);
+    console.error('Birdeye failed (check key/limits):', e.response?.status, e.response?.data || e.message);
   }
 
-  // DEXSCREENER FALLBACK — Gets price + real MC/FDV if Birdeye fails (rare with working key)
+  // JUPITER BACKUP — Free, very low latency price (smooth if Birdeye limited)
   try {
-    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 8000 });
-    const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') 
-                 || res.data.pairs?.find(p => p.quoteToken?.symbol === 'SOL')
-                 || res.data.pairs?.[0];
+    const res = await axios.get(`https://price.jup.ag/v6/price?ids=${ca}`, { timeout: 5000 });
+    const data = res.data.data[ca];
+    if (data && data.price > 0) {
+      return {
+        symbol: ca.slice(0, 8) + '...',
+        price: data.price,
+        mc: data.fdMarketCap ? formatMC(data.fdMarketCap) : 'N/A',
+        liquidity: 0,
+        priceChange1h: 0
+      };
+    }
+  } catch (e) {
+    console.log('Jupiter backup failed:', e.message);
+  }
 
+  // DEXSCREENER LAST — For MC if others lack
+  try {
+    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 7000 });
+    const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL') || res.data.pairs?.[0];
     if (pair && pair.priceUsd > 0) {
       const fdv = pair.fdv || 0;
       return {
@@ -129,14 +143,7 @@ async function getTokenData(ca) {
     console.log('DexScreener failed:', e.message);
   }
 
-  // Final safety fallback
-  return {
-    symbol: ca.slice(0, 8) + '...',
-    price: 0,
-    mc: 'Error',
-    liquidity: 0,
-    priceChange1h: 0
-  };
+  return { symbol: ca.slice(0, 8) + '...', price: 0, mc: 'Error', liquidity: 0, priceChange1h: 0 };
 }
 
 app.get('/health', (req, res) => res.status(200).send('OK'));
