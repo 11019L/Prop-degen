@@ -541,7 +541,7 @@ async function showPositions(ctx) {
 
   await renderPanel(userId, chatId, messageId);
 
-  const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), 2000);
+  const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), 750);
   ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
 }
 
