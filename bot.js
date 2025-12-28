@@ -651,42 +651,68 @@ async function showPositions(ctx) {
 
   userLastActivity.set(userId, Date.now());
 
+  // Clear old interval
+  if (ACTIVE_POSITION_PANELS.has(userId)) {
+    clearInterval(ACTIVE_POSITION_PANELS.get(userId).intervalId);
+  }
+
   let messageId = ctx.update?.callback_query?.message?.message_id;
   if (!messageId) {
-    const sent = await ctx.replyWithMarkdownV2('Loading positions\\.\\.\\.');
+    const sent = await ctx.replyWithMarkdownV2('Loading live positions\\.\\.\\.');
     messageId = sent.message_id;
   }
 
+  // Initial render
   await renderPanel(userId, chatId, messageId);
+
+  // Auto-refresh every 5 seconds
+  const intervalId = setInterval(() => {
+    renderPanel(userId, chatId, messageId).catch(() => {});
+  }, 5000);
+
+  ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
 }
 
 async function renderPanel(userId, chatId, messageId) {
+  const MAX_REFRESH_INTERVAL = 5000; // 5 seconds — fast but safe
+  const startTime = Date.now();
+
   try {
+    // === 1. Fetch user and positions ===
     const [user, positions] = await Promise.all([
-      new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row))),
-      new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])))
-      // Clear cache for this user's positions to ensure fresh prices on refresh
-    const positions = await new Promise(r => db.all('SELECT ca FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])));
-    positions.forEach(pos => priceCache.delete(pos.ca));
+      new Promise((resolve) => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => resolve(row))),
+      new Promise((resolve) => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => resolve(rows || [])))
     ]);
 
-    if (!user) return;
+    if (!user) {
+      clearInterval(ACTIVE_POSITION_PANELS.get(userId)?.intervalId);
+      ACTIVE_POSITION_PANELS.delete(userId);
+      return;
+    }
 
+    // === 2. FORCE FRESH PRICES — Clear cache for all positions ===
+    positions.forEach(pos => priceCache.delete(pos.ca));
+
+    // === 3. Fetch live prices (in parallel) ===
     let totalPnL = 0;
     const buttons = [];
+    let liveDataArray = [];
 
     if (positions.length > 0) {
-      const liveDataArray = await Promise.all(positions.map(p => getTokenData(p.ca)));
+      liveDataArray = await Promise.all(positions.map(p => getTokenData(p.ca)));
 
       positions.forEach((p, i) => {
         const live = liveDataArray[i];
-        const price = live.price > 0 ? live.price : p.entry_price;
-        const pnlUSD = (price - p.entry_price) * p.tokens_bought;
-        const pnlPct = p.entry_price > 0 ? ((price - p.entry_price) / p.entry_price) * 100 : 0;
+        const currentPrice = live.price > 0 ? live.price : p.entry_price * 0.95; // gentle fallback
+        const pnlUSD = (currentPrice - p.entry_price) * p.tokens_bought;
+        const pnlPct = p.entry_price > 0 ? ((currentPrice - p.entry_price) / p.entry_price) * 100 : 0;
 
         totalPnL += pnlUSD;
 
-        buttons.push([{ text: `${live.symbol}${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% | $${pnlUSD.toFixed(2)}`, callback_data: 'noop' }]);
+        buttons.push([
+          { text: `${live.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}% | $${pnlUSD.toFixed(2)}`, callback_data: 'noop' }
+        ]);
+
         if (user.failed === 0) {
           buttons.push([
             { text: '25%', callback_data: `sell_${p.id}_25` },
@@ -697,49 +723,57 @@ async function renderPanel(userId, chatId, messageId) {
       });
     }
 
+    // === 4. Calculate equity, peak, drawdown ===
     const equity = user.balance + totalPnL;
     let peak = user.peak_equity || user.start_balance;
+
     if (equity > peak) {
       peak = equity;
-      await db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [peak, userId]);
+      db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [peak, userId]);
     }
 
     const drawdown = peak > user.start_balance ? ((peak - equity) / peak) * 100 : 0;
     const breached = drawdown >= MAX_DRAWDOWN_PERCENT;
 
     if (user.failed === 0) {
-      if (breached) await db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId]);
-      if (equity >= user.target) await db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId]);
+      if (breached) db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId]);
+      if (equity >= user.target) db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId]);
     }
 
+    // === 5. Status message ===
     let status = '';
     if (user.failed === 1) status = `*FAILED — ${MAX_DRAWDOWN_PERCENT}% DD*\n\n`;
-    if (user.failed === 2) status = `*PASSED\\! $${user.bounty} + PROFITS*\nSend wallet\n\n`;
+    if (user.failed === 2) status = `*PASSED\\! Claim $${user.bounty} + profits*\nSend wallet address\\.\n\n`;
     if (user.failed === 3) status = `*FAILED — INACTIVITY*\n\n`;
 
-    const text = esc(`
-${status}*LIVE POSITIONS*
+    const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-Equity     $${equity.toFixed(2)}
-Unrealized ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
-Peak       $${peak.toFixed(2)}
-Drawdown   ${drawdown.toFixed(2)}%
+    const text = esc(`
+${status}*LIVE POSITIONS* ↻ ${now}
+
+Equity       $${equity.toFixed(2)}
+Unreal PnL   ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
+Peak         $${peak.toFixed(2)}
+Drawdown     ${drawdown.toFixed(2)}%
 
 ${positions.length === 0 ? 'No open positions' : ''}
     `.trim());
 
+    // === 6. Edit message ===
     await bot.telegram.editMessageText(chatId, messageId, null, text, {
       parse_mode: 'MarkdownV2',
       reply_markup: {
         inline_keyboard: [
           ...buttons,
-          [{ text: '🔄 Refresh Now', callback_data: 'refresh_pos' }],
-          [{ text: '❌ Close Panel', callback_data: 'close_pos' }]
+          [{ text: '🔄 Refresh', callback_data: 'refresh_pos' }],
+          [{ text: '❌ Close', callback_data: 'close_pos' }]
         ]
       }
-    }).catch(err => console.log('Edit failed (possibly deleted):', err.message));
+    }).catch(() => {}); // Silent fail if message deleted
+
   } catch (err) {
     console.error('renderPanel error:', err);
+    // Don't crash the interval
   }
 }
 
