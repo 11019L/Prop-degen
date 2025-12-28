@@ -370,66 +370,118 @@ async function handleBuy(ctx, ca) {
 
 bot.action(/buy\|(.+)\|(.+)/, async ctx => {
   await ctx.answerCbQuery();
+
   const ca = ctx.match[1].trim();
   let amountUSD = Number(ctx.match[2]);
   if (isNaN(amountUSD) || amountUSD <= 0) return;
 
   const userId = ctx.from.id;
-  const user = await new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row)));
-  if (!user || user.failed !== 0) return ctx.editMessageText('Challenge inactive');
 
-  const minCash = user.start_balance * CASH_BUFFER_PERCENT;
-  if (user.balance < amountUSD) return ctx.editMessageText('Insufficient balance');
-  if (user.balance - amountUSD < minCash) return ctx.editMessageText(`Keep at least $${minCash.toFixed(0)} cash`);
-  if (amountUSD > user.start_balance * MAX_POSITION_PERCENT) return ctx.editMessageText(`Max ${MAX_POSITION_PERCENT * 100}% per trade`);
-
-  const today = new Date().toISOString().slice(0,10);
-  const tradesToday = await new Promise(r => db.get('SELECT COUNT(*) as c FROM positions WHERE user_id = ? AND DATE(created_at/1000,"unixepoch") = ?', [userId, today], (_, row) => r(row?.c || 0)));
-  if (tradesToday >= MAX_TRADES_PER_DAY) return ctx.editMessageText(`Max ${MAX_TRADES_PER_DAY} trades per day`);
-
-  await ctx.editMessageText('Fetching token data...');
-
-  const token = await getTokenData(ca);
-  if (!token.price || token.price <= 0) return ctx.editMessageText('Token data unavailable');
-
-  let entryPrice = token.price;
-  let tokensBought = amountUSD / entryPrice;
-  let decimals = token.decimals;
-
-  const solPrice = await getSolPrice();
   try {
-    const solAmount = amountUSD / solPrice;
-    const quote = await axios.get('https://quote-api.jup.ag/v6/quote', {
-      params: {
-        inputMint: 'So11111111111111111111111111111111111111112',
-        outputMint: ca,
-        amount: Math.round(solAmount * 1e9),
-        slippageBps: 500
-      },
-      timeout: 7000
+    const user = await new Promise((resolve, reject) => {
+      db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (err, row) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
     });
-    if (quote.data?.outAmount) {
-      tokensBought = Number(quote.data.outAmount) / Math.pow(10, decimals);
-      entryPrice = amountUSD / tokensBought;
+
+    if (!user || user.failed !== 0) {
+      return await ctx.editMessageText('❌ Challenge inactive or failed.');
     }
-  } catch (e) {
-    console.log('Jupiter buy quote failed, using estimate');
-  }
 
-  await new Promise((resolve, reject) => {
-    db.run('BEGIN TRANSACTION');
-    db.run('INSERT INTO positions (user_id, ca, symbol, amount_usd, tokens_bought, entry_price, decimals, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [userId, ca, token.symbol, amountUSD, tokensBought, entryPrice, decimals, Date.now()],
-      err => err && reject(err)
-    );
-    db.run('UPDATE users SET balance = balance - ? WHERE user_id = ?', [amountUSD, userId], err => err && reject(err));
-    db.run('COMMIT', resolve);
-  });
+    const minCash = user.start_balance * CASH_BUFFER_PERCENT;
+    if (user.balance < amountUSD) {
+      return await ctx.editMessageText('❌ Insufficient balance.');
+    }
+    if (user.balance - amountUSD < minCash) {
+      return await ctx.editMessageText(`❌ Must keep at least $${minCash.toFixed(0)} in cash buffer.`);
+    }
+    if (amountUSD > user.start_balance * MAX_POSITION_PERCENT) {
+      return await ctx.editMessageText(`❌ Max position size: ${MAX_POSITION_PERCENT * 100}% of starting capital.`);
+    }
 
-  userLastActivity.set(userId, Date.now());
+    const today = new Date().toISOString().slice(0, 10);
+    const tradesToday = await new Promise((resolve, reject) => {
+      db.get('SELECT COUNT(*) as c FROM positions WHERE user_id = ? AND DATE(created_at/1000,"unixepoch") = ?', [userId, today], (err, row) => {
+        if (err) reject(err);
+        else resolve(row?.c || 0);
+      });
+    });
 
-  await ctx.editMessageText(esc(`
-BUY EXECUTED
+    if (tradesToday >= MAX_TRADES_PER_DAY) {
+      return await ctx.editMessageText(`❌ Max ${MAX_TRADES_PER_DAY} trades per day reached.`);
+    }
+
+    await ctx.editMessageText('🔍 Fetching token data...');
+
+    const token = await getTokenData(ca);
+    if (!token.price || token.price <= 0) {
+      return await ctx.editMessageText(esc(`
+❌ Token data unavailable
+
+• Token may be too new
+• No liquidity on Raydium
+• Invalid or honeypot contract
+
+Try again in a few minutes or use a different token.
+      `.trim()), { parse_mode: 'MarkdownV2' });
+    }
+
+    let entryPrice = token.price;
+    let tokensBought = amountUSD / entryPrice;
+    let decimals = token.decimals;
+
+    // Try Jupiter quote for more accurate token amount
+    try {
+      const solPrice = await getSolPrice();
+      const solAmount = amountUSD / solPrice;
+
+      const quote = await axios.get('https://quote-api.jup.ag/v6/quote', {
+        params: {
+          inputMint: 'So11111111111111111111111111111111111111112',
+          outputMint: ca,
+          amount: Math.round(solAmount * 1e9),
+          slippageBps: 500
+        },
+        timeout: 10000  // Increased timeout
+      });
+
+      if (quote.data?.outAmount) {
+        tokensBought = Number(quote.data.outAmount) / Math.pow(10, decimals);
+        entryPrice = amountUSD / tokensBought;
+      }
+    } catch (e) {
+      console.log('Jupiter quote failed, using price estimate:', e.message);
+      // Continue with DexScreener/Birdeye price — it's acceptable
+    }
+
+    // Execute trade in DB
+    await new Promise((resolve, reject) => {
+      db.run('BEGIN TRANSACTION', err => {
+        if (err) return reject(err);
+
+        db.run(
+          'INSERT INTO positions (user_id, ca, symbol, amount_usd, tokens_bought, entry_price, decimals, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [userId, ca, token.symbol, amountUSD, tokensBought, entryPrice, decimals, Date.now()],
+          err => { if (err) reject(err); }
+        );
+
+        db.run('UPDATE users SET balance = balance - ? WHERE user_id = ?', [amountUSD, userId], err => {
+          if (err) reject(err);
+        });
+
+        db.run('COMMIT', err => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+    });
+
+    userLastActivity.set(userId, Date.now());
+
+    // Final success message
+    await ctx.editMessageText(esc(`
+✅ BUY EXECUTED
 
 ${token.symbol}
 Size: $${amountUSD}
@@ -438,17 +490,37 @@ Entry: $${entryPrice.toFixed(12)}
 MC: ${token.mc}
 Liquidity: $${token.liquidity.toFixed(0)}
 
-Remaining: $${(user.balance - amountUSD).toFixed(2)}
-  `.trim()), {
-    parse_mode: 'MarkdownV2',
-    reply_markup: { inline_keyboard: [[{ text: "Open Positions", callback_data: "refresh_pos" }]] }
-  });
+Remaining cash: $${(user.balance - amountUSD).toFixed(2)}
+    `.trim()), {
+      parse_mode: 'MarkdownV2',
+      reply_markup: {
+        inline_keyboard: [[{ text: "📊 Open Positions", callback_data: "refresh_pos" }]]
+      }
+    });
+
+  } catch (error) {
+    console.error(`Buy failed for user ${userId} | CA: ${ca} | Amount: ${amountUSD}`, error);
+
+    try {
+      await ctx.editMessageText(esc(`
+❌ Buy failed
+
+An error occurred while processing your trade.
+Please try again in a moment.
+
+If this persists, the token may not be tradable yet.
+      `.trim()), { parse_mode: 'MarkdownV2' });
+    } catch (editErr) {
+      console.error('Could not send error message:', editErr);
+    }
+  }
 });
 
+// === CUSTOM AMOUNT HANDLER (Fixed) ===
 bot.action(/custom\|(.+)/, async ctx => {
   await ctx.answerCbQuery();
-  ctx.session.pendingBuyCA = ctx.match[1].trim(); // Safer key name
-  ctx.reply('Send amount in USD (e.g., 75):');
+  ctx.session.pendingBuyCA = ctx.match[1].trim();
+  await ctx.reply('💵 Send the amount in USD (e.g., 75):');
 });
 
 bot.on('text', async ctx => {
@@ -457,21 +529,29 @@ bot.on('text', async ctx => {
     const ca = ctx.session.pendingBuyCA;
     delete ctx.session.pendingBuyCA;
 
-    if (amount > 0 && !isNaN(amount)) {
-      const fakeCtx = {
-        ...ctx,
-        match: ['', ca, amount],
-        from: ctx.from,
-        answerCbQuery: () => {},
-        editMessageText: (text, opts) => ctx.replyWithMarkdownV2(text, opts)
-      };
-      await bot.action(/buy\|(.+)\|(.+)/).callback(fakeCtx);
-    } else {
-      ctx.reply('Invalid amount. Try again.');
+    if (isNaN(amount) || amount <= 0) {
+      return ctx.reply('❌ Invalid amount. Please send a positive number.');
     }
+
+    // Simulate a callback query context for the buy handler
+    const fakeCtx = {
+      ...ctx,
+      match: ['', ca, amount],
+      from: ctx.from,
+      answerCbQuery: () => {},
+      editMessageText: async (text, options) => {
+        // For custom buys, we reply instead of edit (no prior message to edit)
+        await ctx.replyWithMarkdownV2(text, options);
+      },
+      replyWithMarkdownV2: ctx.replyWithMarkdownV2.bind(ctx)
+    };
+
+    // Reuse the same buy logic
+    await bot.action(/buy\|(.+)\|(.+)/).callback(fakeCtx);
     return;
   }
 
+  // Direct CA paste
   const text = ctx.message.text.trim();
   if (/^[1-9A-HJ-NP-Za-km-z]{32,48}$/i.test(text)) {
     await handleBuy(ctx, text);
