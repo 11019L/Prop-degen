@@ -312,6 +312,7 @@ bot.command('influencer', async ctx => {
 bot.start(async ctx => {
   const payload = ctx.startPayload || '';
 
+  // === MAIN WELCOME MESSAGE (always shown) ===
   await ctx.replyWithMarkdownV2(
     "*CRUCIBLE — SOLANA PROP FIRM*\n\n" +
     "Purchase an account and start high leveraging\n" +
@@ -328,26 +329,68 @@ bot.start(async ctx => {
     }
   );
 
-  if (payload === 'free200') {
+  // === FREE ACCOUNT HANDLER — Multiple Tiers ===
+  let tierKey = null;
+
+  if (payload === 'free200') tierKey = 20;
+  else if (payload === 'free300') tierKey = 30;
+  else if (payload === 'free400') tierKey = 40;
+  else if (payload === 'free500') tierKey = 50;
+
+  if (tierKey) {
     const userId = ctx.from.id;
-    const tier = TIERS[30];
+    const tier = TIERS[tierKey];
 
-    await new Promise(r => db.run(`
-      INSERT OR REPLACE INTO users 
-      (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity, entry_fee, created_at)
-      VALUES (?, 1, ?, ?, ?, ?, 0, ?, 0, ?)
-    `, [userId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance, Date.now()], r));
+    if (!tier) {
+      return ctx.reply('❌ Invalid free tier. Contact admin.');
+    }
 
-    await new Promise(r => db.run('DELETE FROM positions WHERE user_id = ?', [userId], r));
+    try {
+      // Clear old data and activate free account
+      await new Promise((resolve, reject) => {
+        db.run('BEGIN TRANSACTION', err => {
+          if (err) return reject(err);
 
-    return ctx.replyWithMarkdownV2(
-      "*Live account active*\n\n" +
-      `Capital: $${tier.balance}\n` +
-      `Target: $${tier.target}\n` +
-      `Max DD: ${MAX_DRAWDOWN_PERCENT}%\n\n` +
-      "Start trading now\\.",
-      { reply_markup: { inline_keyboard: [[{ text: "Open Live Positions", callback_data: "refresh_pos" }]] } }
-    );
+          db.run(`
+            INSERT OR REPLACE INTO users 
+            (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity, entry_fee, created_at)
+            VALUES (?, 1, ?, ?, ?, ?, 0, ?, 0, ?)
+          `, [userId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance, Date.now()], err => {
+            if (err) reject(err);
+          });
+
+          db.run('DELETE FROM positions WHERE user_id = ?', [userId], err => {
+            if (err) reject(err);
+          });
+
+          db.run('COMMIT', err => err ? reject(err) : resolve());
+        });
+      });
+
+      // Success message with correct tier details
+      await ctx.replyWithMarkdownV2(
+        `*FREE $${tier.balance} CHALLENGE ACTIVATED* 🎉\n\n` +
+        `Capital: $${tier.balance}\n` +
+        `Profit Target: $${tier.target}\n` +
+        `Bounty: $${tier.bounty}\n` +
+        `Max Drawdown: ${MAX_DRAWDOWN_PERCENT}%\n\n` +
+        "Paste any Solana token CA to start trading\\!\n" +
+        "Good luck — survive or die\\.",
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "📊 Open Live Positions", callback_data: "refresh_pos" }]
+            ]
+          }
+        }
+      );
+
+    } catch (error) {
+      console.error('Free account activation failed:', error);
+      await ctx.reply('❌ Failed to activate free account. Try again later.');
+    }
+
+    return;
   }
 });
 
