@@ -330,7 +330,7 @@ bot.start(async ctx => {
 
   if (payload === 'free200') {
     const userId = ctx.from.id;
-    const tier = TIERS[20];
+    const tier = TIERS[30];
 
     await new Promise(r => db.run(`
       INSERT OR REPLACE INTO users 
@@ -341,7 +341,7 @@ bot.start(async ctx => {
     await new Promise(r => db.run('DELETE FROM positions WHERE user_id = ?', [userId], r));
 
     return ctx.replyWithMarkdownV2(
-      "*FREE $200 ACCOUNT ACTIVATED*\n\n" +
+      "*Live account active*\n\n" +
       `Capital: $${tier.balance}\n` +
       `Target: $${tier.target}\n` +
       `Max DD: ${MAX_DRAWDOWN_PERCENT}%\n\n` +
