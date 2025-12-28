@@ -10,7 +10,8 @@ bot.use(session());
 const app = express();
 app.use(express.json());
 
-const db = new sqlite3.Database('crucible.db');
+const dbPath = process.env.DB_PATH || '/data/crucible.db';
+const db = new sqlite3.Database(dbPath);
 db.exec('PRAGMA journal_mode = WAL;');
 
 const ADMIN_ID = Number(process.env.ADMIN_ID);
