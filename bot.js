@@ -91,68 +91,102 @@ function formatMC(marketCap) {
 async function getTokenData(ca) {
   const now = Date.now();
   const cached = priceCache.get(ca);
-  if (cached && now - cached.timestamp < 10000) { // Increased to 10s
+  if (cached && now - cached.timestamp < 5000) { // Short cache for fast updates
     return cached.data;
   }
 
   let result = {
     symbol: ca.slice(0, 8) + '...',
     price: 0,
-    mc: 'Error',
+    mc: 'Unknown',
     liquidity: 0,
     priceChange1h: 0,
     decimals: 9
   };
 
-  try {
-    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 7000 });
-    const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL')
-              || res.data.pairs?.find(p => p.quoteToken?.symbol === 'SOL')
-              || res.data.pairs?.[0];
-
-    if (pair && pair.priceUsd > 0) {
-      const fdv = pair.fdv || 0;
-      result = {
-        symbol: pair.baseToken.symbol || ca.slice(0, 8) + '...',
-        price: parseFloat(pair.priceUsd),
-        mc: fdv > 0 ? formatMC(fdv) : 'N/A',
-        liquidity: parseFloat(pair.liquidity?.usd || 0),
-        priceChange1h: parseFloat(pair.priceChange?.h1 || 0),
-        decimals: pair.baseToken.decimals || 9
-      };
-      priceCache.set(ca, { data: result, timestamp: now });
-      return result;
-    }
-  } catch (e) {
-    console.log('DexScreener failed:', e.message);
-  }
+  // Overall hard timeout — prevents hanging forever
+  const timeoutPromise = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('Token data timeout')), 12000)
+  );
 
   try {
-    const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
-      headers: {
-        'X-API-KEY': process.env.BIRDEYE_API_KEY,
-        'x-chain': 'solana'
-      },
-      timeout: 6000
-    });
+    await Promise.race([
+      (async () => {
+        // 1. Jupiter Price API — fastest & most reliable for memecoins
+        try {
+          const res = await axios.get(`https://price.jup.ag/v6/price?ids=${ca}`, { timeout: 8000 });
+          const data = res.data.data[ca];
+          if (data && data.price > 0) {
+            result.price = data.price;
+            result.symbol = data.mintSymbol || data.symbol || result.symbol;
+            if (data.marketCap) result.mc = formatMC(data.marketCap);
+            // Jupiter doesn't provide liquidity/decimals directly, but price is priority
+            throw new Error('success'); // Early exit from race
+          }
+        } catch (e) {
+          if (e.message !== 'success') console.log('Jupiter price failed:', e.message);
+        }
 
-    if (res.data?.success && res.data.data?.value > 0) {
-      const d = res.data.data;
-      result = {
-        ...result,
-        symbol: d.symbol || ca.slice(0, 8) + '...',
-        price: d.value,
-        liquidity: d.liquidity || 0,
-        priceChange1h: d.priceChange?.h1 || 0
-      };
-      priceCache.set(ca, { data: result, timestamp: now });
-      return result;
-    }
+        // 2. DexScreener fallback
+        try {
+          const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 7000 });
+          const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL')
+                    || res.data.pairs?.find(p => p.quoteToken?.symbol === 'SOL')
+                    || res.data.pairs?.[0];
+
+          if (pair && pair.priceUsd > 0) {
+            const fdv = pair.fdv || 0;
+            result = {
+              symbol: pair.baseToken.symbol || ca.slice(0, 8) + '...',
+              price: parseFloat(pair.priceUsd),
+              mc: fdv > 0 ? formatMC(fdv) : 'N/A',
+              liquidity: parseFloat(pair.liquidity?.usd || 0),
+              priceChange1h: parseFloat(pair.priceChange?.h1 || 0),
+              decimals: pair.baseToken.decimals || 9
+            };
+            throw new Error('success');
+          }
+        } catch (e) {
+          if (e.message !== 'success') console.log('DexScreener failed:', e.message);
+        }
+
+        // 3. Birdeye fallback (uses your key if set)
+        try {
+          const headers = process.env.BIRDEYE_API_KEY 
+            ? { 'X-API-KEY': process.env.BIRDEYE_API_KEY, 'x-chain': 'solana' }
+            : { 'x-chain': 'solana' };
+
+          const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${ca}`, {
+            headers,
+            timeout: 6000
+          });
+
+          if (res.data?.success && res.data.data?.value > 0) {
+            const d = res.data.data;
+            result.symbol = d.symbol || result.symbol;
+            result.price = d.value;
+            result.liquidity = d.liquidity || result.liquidity;
+            result.priceChange1h = d.priceChange?.h1 || 0;
+            throw new Error('success');
+          }
+        } catch (e) {
+          if (e.message !== 'success') console.log('Birdeye failed:', e.message);
+        }
+      })(),
+      timeoutPromise
+    ]);
+
+    // Cache whatever we got (even if price 0)
+    priceCache.set(ca, { data: result, timestamp: now });
+    return result;
+
   } catch (e) {
-    console.error('Birdeye failed:', e.message);
+    if (e.message === 'Token data timeout') {
+      console.log('getTokenData timed out for', ca);
+    }
+    priceCache.set(ca, { data: result, timestamp: now });
+    return result; // Always returns quickly
   }
-
-  return result;
 }
 
 async function getSolPrice() {
@@ -631,6 +665,9 @@ async function renderPanel(userId, chatId, messageId) {
     const [user, positions] = await Promise.all([
       new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row))),
       new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])))
+      // Clear cache for this user's positions to ensure fresh prices on refresh
+    const positions = await new Promise(r => db.all('SELECT ca FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])));
+    positions.forEach(pos => priceCache.delete(pos.ca));
     ]);
 
     if (!user) return;
