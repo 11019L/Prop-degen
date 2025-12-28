@@ -14,7 +14,7 @@ const db = new sqlite3.Database('crucible.db');
 db.exec('PRAGMA journal_mode = WAL;');
 
 const ADMIN_ID = Number(process.env.ADMIN_ID);
-const ACTIVE_POSITION_PANELS = new Map();
+const ACTIVE_POSITION_PANELS = new Map(); // Now only tracks for cleanup
 const userLastActivity = new Map();
 const priceCache = new Map();
 
@@ -73,6 +73,7 @@ db.serialize(() => {
   )`);
 });
 
+// Backward compatibility
 db.run(`ALTER TABLE users ADD COLUMN peak_equity REAL`, () => {});
 db.run(`ALTER TABLE users ADD COLUMN entry_fee REAL`, () => {});
 db.run(`ALTER TABLE users ADD COLUMN created_at INTEGER`, () => {});
@@ -89,7 +90,7 @@ function formatMC(marketCap) {
 async function getTokenData(ca) {
   const now = Date.now();
   const cached = priceCache.get(ca);
-  if (cached && now - cached.timestamp < 3000) {
+  if (cached && now - cached.timestamp < 10000) { // Increased to 10s
     return cached.data;
   }
 
@@ -328,10 +329,6 @@ bot.command('admin_test', async ctx => {
   `, [ctx.from.id, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance, pay, Date.now()], r));
 
   await new Promise(r => db.run('DELETE FROM positions WHERE user_id = ?', [ctx.from.id], r));
-  if (ACTIVE_POSITION_PANELS.has(ctx.from.id)) {
-    clearInterval(ACTIVE_POSITION_PANELS.get(ctx.from.id).intervalId);
-    ACTIVE_POSITION_PANELS.delete(ctx.from.id);
-  }
 
   await ctx.replyWithMarkdownV2(`*TEST ACCOUNT READY*\nTier: $${pay} → $${tier.balance}\nTarget: $${tier.target}\nBounty: $${tier.bounty}`, {
     reply_markup: { inline_keyboard: [[{ text: "Open Positions", callback_data: "refresh_pos" }]] }
@@ -394,7 +391,6 @@ bot.action(/buy\|(.+)\|(.+)/, async ctx => {
 
   const token = await getTokenData(ca);
   if (!token.price || token.price <= 0) return ctx.editMessageText('Token data unavailable');
-  // Liquidity check REMOVED as requested
 
   let entryPrice = token.price;
   let tokensBought = amountUSD / entryPrice;
@@ -451,27 +447,38 @@ Remaining: $${(user.balance - amountUSD).toFixed(2)}
 
 bot.action(/custom\|(.+)/, async ctx => {
   await ctx.answerCbQuery();
-  ctx.session.ca = ctx.match[1];
-  ctx.reply('Send amount in USD:');
+  ctx.session.pendingBuyCA = ctx.match[1].trim(); // Safer key name
+  ctx.reply('Send amount in USD (e.g., 75):');
 });
 
 bot.on('text', async ctx => {
-  if (ctx.session?.ca) {
-    const amount = Number(ctx.message.text);
-    delete ctx.session.ca;
+  if (ctx.session?.pendingBuyCA) {
+    const amount = Number(ctx.message.text.trim());
+    const ca = ctx.session.pendingBuyCA;
+    delete ctx.session.pendingBuyCA;
+
     if (amount > 0 && !isNaN(amount)) {
-      const fakeCtx = { ...ctx, match: ['', ctx.session?.ca || '', amount], answerCbQuery: () => {}, editMessageText: ctx.replyWithMarkdownV2.bind(ctx) };
+      const fakeCtx = {
+        ...ctx,
+        match: ['', ca, amount],
+        from: ctx.from,
+        answerCbQuery: () => {},
+        editMessageText: (text, opts) => ctx.replyWithMarkdownV2(text, opts)
+      };
       await bot.action(/buy\|(.+)\|(.+)/).callback(fakeCtx);
     } else {
-      ctx.reply('Invalid amount');
+      ctx.reply('Invalid amount. Try again.');
     }
     return;
   }
+
   const text = ctx.message.text.trim();
-  if (/^[1-9A-HJ-NP-Za-km-z]{32,48}$/i.test(text)) await handleBuy(ctx, text);
+  if (/^[1-9A-HJ-NP-Za-km-z]{32,48}$/i.test(text)) {
+    await handleBuy(ctx, text);
+  }
 });
 
-// === SELL LOGIC (FIXED PROCEEDS CALCULATION) ===
+// === SELL LOGIC ===
 bot.action(/sell_(\d+)_(\d+)/, async ctx => {
   try { await ctx.answerCbQuery(); } catch {}
   const posId = ctx.match[1];
@@ -485,22 +492,23 @@ bot.action(/sell_(\d+)_(\d+)/, async ctx => {
   if (!pos) return;
 
   const live = await getTokenData(pos.ca);
-  const currentPrice = live.price > 0 ? live.price : pos.entry_price * 0.01;
+  const currentPrice = live.price > 0 ? live.price : pos.entry_price;
 
   const tokensToSell = pos.tokens_bought * (percent / 100);
   const solReceived = await getSellQuote(pos.ca, tokensToSell, pos.decimals);
   const solPrice = await getSolPrice();
 
-  const proceeds = solReceived !== null 
+  // Prioritize real quote, fallback conservatively
+  const realizedUSD = solReceived !== null 
     ? solReceived * solPrice 
-    : tokensToSell * currentPrice;
+    : tokensToSell * currentPrice * 0.95; // 5% safety margin on estimate
 
   const originalCost = pos.amount_usd * (percent / 100);
-  const pnl = proceeds - originalCost;
+  const pnl = realizedUSD - originalCost;
 
   await new Promise((resolve, reject) => {
     db.run('BEGIN TRANSACTION');
-    db.run('UPDATE users SET balance = balance + ? WHERE user_id = ?', [proceeds, userId], err => err && reject(err));
+    db.run('UPDATE users SET balance = balance + ? WHERE user_id = ?', [realizedUSD, userId], err => err && reject(err));
     if (percent === 100) {
       db.run('DELETE FROM positions WHERE id = ?', [posId], err => err && reject(err));
     } else {
@@ -514,24 +522,19 @@ bot.action(/sell_(\d+)_(\d+)/, async ctx => {
 *SOLD ${percent}%*
 
 ${live.symbol}
-Proceeds: $${proceeds.toFixed(2)}${solReceived === null ? ' *(estimate)*' : ''}
+Realized: $${realizedUSD.toFixed(2)}${solReceived === null ? ' *(estimate)*' : ''}
 PnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}
   `.trim()));
 
-  showPositions(ctx);
+  await showPositions(ctx);
 });
 
-// === POSITIONS PANEL ===
+// === MANUAL POSITIONS PANEL ===
 async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update.callback_query.from.id;
   const chatId = ctx.chat?.id || ctx.update.callback_query.message.chat.id;
 
   userLastActivity.set(userId, Date.now());
-
-  if (ACTIVE_POSITION_PANELS.has(userId)) {
-    clearInterval(ACTIVE_POSITION_PANELS.get(userId).intervalId);
-    ACTIVE_POSITION_PANELS.delete(userId);
-  }
 
   let messageId = ctx.update?.callback_query?.message?.message_id;
   if (!messageId) {
@@ -540,66 +543,63 @@ async function showPositions(ctx) {
   }
 
   await renderPanel(userId, chatId, messageId);
-
-  const intervalId = setInterval(() => renderPanel(userId, chatId, messageId), 750);
-  ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
 }
 
 async function renderPanel(userId, chatId, messageId) {
-  const [user, positions] = await Promise.all([
-    new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row))),
-    new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])))
-  ]);
+  try {
+    const [user, positions] = await Promise.all([
+      new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row))),
+      new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])))
+    ]);
 
-  if (!user) return;
+    if (!user) return;
 
-  let totalPnL = 0;
-  const buttons = [];
+    let totalPnL = 0;
+    const buttons = [];
 
-  if (positions.length > 0) {
-    const liveDataPromises = positions.map(p => getTokenData(p.ca));
-    const liveDataArray = await Promise.all(liveDataPromises);
+    if (positions.length > 0) {
+      const liveDataArray = await Promise.all(positions.map(p => getTokenData(p.ca)));
 
-    positions.forEach((p, i) => {
-      const live = liveDataArray[i];
-      const price = live.price > 0 ? live.price : p.entry_price * 0.01;
-      const pnlUSD = (price - p.entry_price) * p.tokens_bought;
-      const pnlPct = p.entry_price > 0 ? ((price - p.entry_price) / p.entry_price) * 100 : 0;
+      positions.forEach((p, i) => {
+        const live = liveDataArray[i];
+        const price = live.price > 0 ? live.price : p.entry_price;
+        const pnlUSD = (price - p.entry_price) * p.tokens_bought;
+        const pnlPct = p.entry_price > 0 ? ((price - p.entry_price) / p.entry_price) * 100 : 0;
 
-      totalPnL += pnlUSD;
+        totalPnL += pnlUSD;
 
-      buttons.push([{ text: `${live.symbol}${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% | $${pnlUSD.toFixed(2)}`, callback_data: 'noop' }]);
-      if (user.failed === 0) {
-        buttons.push([
-          { text: '25%', callback_data: `sell_${p.id}_25` },
-          { text: '50%', callback_data: `sell_${p.id}_50` },
-          { text: '100%', callback_data: `sell_${p.id}_100` }
-        ]);
-      }
-    });
-  }
+        buttons.push([{ text: `${live.symbol}${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}% | $${pnlUSD.toFixed(2)}`, callback_data: 'noop' }]);
+        if (user.failed === 0) {
+          buttons.push([
+            { text: '25%', callback_data: `sell_${p.id}_25` },
+            { text: '50%', callback_data: `sell_${p.id}_50` },
+            { text: '100%', callback_data: `sell_${p.id}_100` }
+          ]);
+        }
+      });
+    }
 
-  const equity = user.balance + totalPnL;
-  let peak = user.peak_equity || user.start_balance;
-  if (equity > peak) {
-    peak = equity;
-    await db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [peak, userId]);
-  }
+    const equity = user.balance + totalPnL;
+    let peak = user.peak_equity || user.start_balance;
+    if (equity > peak) {
+      peak = equity;
+      await db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [peak, userId]);
+    }
 
-  const drawdown = peak > user.start_balance ? ((peak - equity) / peak) * 100 : 0;
-  const breached = drawdown >= MAX_DRAWDOWN_PERCENT;
+    const drawdown = peak > user.start_balance ? ((peak - equity) / peak) * 100 : 0;
+    const breached = drawdown >= MAX_DRAWDOWN_PERCENT;
 
-  if (user.failed === 0) {
-    if (breached) await db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId]);
-    if (equity >= user.target) await db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId]);
-  }
+    if (user.failed === 0) {
+      if (breached) await db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId]);
+      if (equity >= user.target) await db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId]);
+    }
 
-  let status = '';
-  if (user.failed === 1) status = `*FAILED — ${MAX_DRAWDOWN_PERCENT}% DD*\n\n`;
-  if (user.failed === 2) status = `*PASSED\\! $${user.bounty} + PROFITS*\nSend wallet\n\n`;
-  if (user.failed === 3) status = `*FAILED — INACTIVITY*\n\n`;
+    let status = '';
+    if (user.failed === 1) status = `*FAILED — ${MAX_DRAWDOWN_PERCENT}% DD*\n\n`;
+    if (user.failed === 2) status = `*PASSED\\! $${user.bounty} + PROFITS*\nSend wallet\n\n`;
+    if (user.failed === 3) status = `*FAILED — INACTIVITY*\n\n`;
 
-  const text = esc(`
+    const text = esc(`
 ${status}*LIVE POSITIONS*
 
 Equity     $${equity.toFixed(2)}
@@ -608,45 +608,48 @@ Peak       $${peak.toFixed(2)}
 Drawdown   ${drawdown.toFixed(2)}%
 
 ${positions.length === 0 ? 'No open positions' : ''}
-  `.trim());
+    `.trim());
 
-  await bot.telegram.editMessageText(chatId, messageId, null, text, {
-    parse_mode: 'MarkdownV2',
-    reply_markup: {
-      inline_keyboard: [
-        ...buttons,
-        [{ text: 'Refresh', callback_data: 'refresh_pos' }],
-        [{ text: 'Close', callback_data: 'close_pos' }]
-      ]
-    }
-  }).catch(() => {});
+    await bot.telegram.editMessageText(chatId, messageId, null, text, {
+      parse_mode: 'MarkdownV2',
+      reply_markup: {
+        inline_keyboard: [
+          ...buttons,
+          [{ text: '🔄 Refresh Now', callback_data: 'refresh_pos' }],
+          [{ text: '❌ Close Panel', callback_data: 'close_pos' }]
+        ]
+      }
+    }).catch(err => console.log('Edit failed (possibly deleted):', err.message));
+  } catch (err) {
+    console.error('renderPanel error:', err);
+  }
 }
 
-bot.action('refresh_pos', async ctx => { await ctx.answerCbQuery(); await showPositions(ctx); });
+bot.action('refresh_pos', async ctx => {
+  await ctx.answerCbQuery();
+  await showPositions(ctx);
+});
 
 bot.action('close_pos', async ctx => {
   await ctx.answerCbQuery();
-  const userId = ctx.from.id;
-  if (ACTIVE_POSITION_PANELS.has(userId)) {
-    clearInterval(ACTIVE_POSITION_PANELS.get(userId).intervalId);
-    ACTIVE_POSITION_PANELS.delete(userId);
-  }
-  await ctx.deleteMessage();
+  await ctx.deleteMessage().catch(() => {});
 });
 
-// === INACTIVITY CHECKER ===
+bot.action('noop', ctx => ctx.answerCbQuery());
+
+// === INACTIVITY CHECKER (every hour now) ===
 setInterval(() => {
   const now = Date.now();
-  for (const [userId, last] of userLastActivity) {
+  for (const [userId, last] of userLastActivity.entries()) {
     if (now - last > INACTIVITY_HOURS * 3600000) {
       db.run('UPDATE users SET failed = 3 WHERE user_id = ? AND failed = 0', [userId]);
       userLastActivity.delete(userId);
     }
   }
-}, 6 * 3600000);
+}, 3600000); // Hourly
 
 bot.launch();
-app.listen(process.env.PORT || 3000, () => console.log('Crucible Bot Running'));
+app.listen(process.env.PORT || 3000, () => console.log('Crucible Bot Running (Manual Refresh Mode)'));
 
 process.on('SIGINT', () => { db.close(); process.exit(); });
 process.on('SIGTERM', () => { db.close(); process.exit(); });
