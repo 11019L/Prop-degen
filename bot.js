@@ -843,8 +843,44 @@ setInterval(() => {
   }
 }, 3600000); // Hourly
 
-bot.launch();
-app.listen(process.env.PORT || 3000, () => console.log('Crucible Bot Running (Manual Refresh Mode)'));
+// === WEBHOOK SETUP FOR RAILWAY ===
+const PORT = process.env.PORT || 3000;
+const WEBHOOK_PATH = `/bot${process.env.BOT_TOKEN}`;
 
-process.on('SIGINT', () => { db.close(); process.exit(); });
-process.on('SIGTERM', () => { db.close(); process.exit(); });
+app.use(express.json()); // Make sure this is already above, keep it
+
+// Handle all Telegram updates via webhook
+app.use(WEBHOOK_PATH, bot.webhookCallback(WEBHOOK_PATH));
+
+// Fallback for health check
+app.get('/', (req, res) => res.send('Bot is running!'));
+
+app.listen(PORT, async () => {
+  console.log(`Server running on port ${PORT}`);
+
+  // Construct the full public URL
+  const domain = process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RENDER_EXTERNAL_URL || `your-app-name.up.railway.app`;
+  const webhookUrl = `https://${domain}${WEBHOOK_PATH}`;
+
+  try {
+    const info = await bot.telegram.setWebhook(webhookUrl);
+    console.log(`Webhook set successfully: ${webhookUrl}`);
+    console.log('Bot is now live and receiving updates!');
+  } catch (error) {
+    console.error('Failed to set webhook:', error.message);
+    console.error('Check your BOT_TOKEN and public domain.');
+  }
+});
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('Shutting down...');
+  db.close();
+  process.exit();
+});
+
+process.on('SIGTERM', () => {
+  console.log('Shutting down...');
+  db.close();
+  process.exit();
+});
