@@ -844,14 +844,28 @@ setInterval(() => {
 }, 3600000); // Hourly
 
 // === SIMPLE POLLING MODE (WORKS EVERYWHERE, INCLUDING RAILWAY) ===
-bot.launch({
-  dropPendingUpdates: true  // Clears old messages on start
-}).then(() => {
-  console.log('Bot started successfully with polling!');
-  console.log('Bot is now responding to /start, free links, buys, positions, etc.');
-});
+// === FORCE DELETE WEBHOOK + START POLLING ===
+(async () => {
+  try {
+    // This deletes any existing webhook
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    console.log('✅ Any old webhook deleted — polling will now work');
+  } catch (err) {
+    console.log('No webhook to delete or error (this is fine):', err.message);
+  }
 
-// Enable graceful stop
+  // Now start polling
+  bot.launch({
+    dropPendingUpdates: true
+  }).then(() => {
+    console.log('🚀 Bot launched successfully with polling!');
+    console.log('Now responding to /start, free links (?start=free200), buys, positions, etc.');
+  }).catch(err => {
+    console.error('Bot launch failed:', err);
+  });
+})();
+
+// Graceful shutdown
 process.once('SIGINT', () => {
   console.log('Stopping bot...');
   bot.stop('SIGINT');
@@ -863,9 +877,9 @@ process.once('SIGTERM', () => {
   db.close();
 });
 
-// Keep Express server alive for Railway health checks
+// Health server for Railway (keeps app awake)
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Crucible Bot is running (polling mode)'));
+app.get('/', (req, res) => res.send('Crucible Bot Running (Polling Mode)'));
 app.get('/health', (req, res) => res.send('OK'));
 app.listen(PORT, () => {
   console.log(`Health server running on port ${PORT}`);
