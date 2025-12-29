@@ -843,32 +843,51 @@ setInterval(() => {
   }
 }, 3600000); // Hourly
 
-// === WEBHOOK SETUP FOR RAILWAY ===
+// === FINAL WORKING WEBHOOK SETUP FOR RAILWAY (DEC 2025) ===
 const PORT = process.env.PORT || 3000;
-const WEBHOOK_PATH = `/bot${process.env.BOT_TOKEN}`;
 
-app.use(express.json()); // Make sure this is already above, keep it
+// Use a simple, fixed path — safer and avoids token exposure in URL
+const WEBHOOK_PATH = '/webhook';
 
-// Handle all Telegram updates via webhook
-app.use(WEBHOOK_PATH, bot.webhookCallback(WEBHOOK_PATH));
+// Mount webhook handler
+app.post(WEBHOOK_PATH, bot.webhookCallback(WEBHOOK_PATH));
 
-// Fallback for health check
-app.get('/', (req, res) => res.send('Bot is running!'));
+// Health check
+app.get('/', (req, res) => res.send('Crucible Bot is running!'));
+
+app.get('/health', (req, res) => res.send('OK'));
 
 app.listen(PORT, async () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server started on port ${PORT}`);
 
-  // Construct the full public URL
-  const domain = process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RENDER_EXTERNAL_URL || `your-app-name.up.railway.app`;
+  // Railway provides your public domain automatically
+  const domain = process.env.RAILWAY_PUBLIC_DOMAIN;
+
+  if (!domain) {
+    console.error('❌ RAILWAY_PUBLIC_DOMAIN not found!');
+    console.error('Go to Railway Dashboard → Settings → Generate Domain');
+    return;
+  }
+
   const webhookUrl = `https://${domain}${WEBHOOK_PATH}`;
+  console.log(`Attempting to set webhook: ${webhookUrl}`);
 
   try {
-    const info = await bot.telegram.setWebhook(webhookUrl);
-    console.log(`Webhook set successfully: ${webhookUrl}`);
-    console.log('Bot is now live and receiving updates!');
+    // First: Delete any old webhook (critical!)
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    console.log('Old webhook cleared');
+
+    // Then set new one
+    const result = await bot.telegram.setWebhook(webhookUrl);
+    if (result) {
+      console.log(`✅ Webhook successfully set: ${webhookUrl}`);
+      console.log('Bot is now LIVE and receiving messages!');
+    }
   } catch (error) {
-    console.error('Failed to set webhook:', error.message);
-    console.error('Check your BOT_TOKEN and public domain.');
+    console.error('❌ Failed to set webhook:', error.message);
+    if (error.response) {
+      console.error('Telegram error:', error.response.description);
+    }
   }
 });
 
@@ -878,7 +897,6 @@ process.on('SIGINT', () => {
   db.close();
   process.exit();
 });
-
 process.on('SIGTERM', () => {
   console.log('Shutting down...');
   db.close();
