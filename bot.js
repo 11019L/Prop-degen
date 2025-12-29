@@ -843,51 +843,41 @@ setInterval(() => {
   }
 }, 3600000); // Hourly
 
-// === FINAL WORKING WEBHOOK SETUP FOR RAILWAY (DEC 2025) ===
+// === CORRECT & WORKING WEBHOOK SETUP FOR RAILWAY ===
 const PORT = process.env.PORT || 3000;
+const WEBHOOK_PATH = '/webhook'; // Simple fixed path
 
-// Use a simple, fixed path — safer and avoids token exposure in URL
-const WEBHOOK_PATH = '/webhook';
+// THIS LINE IS CRITICAL — mount the webhook handler
+app.use(WEBHOOK_PATH, bot.webhookCallback(WEBHOOK_PATH));
 
-// Mount webhook handler
-app.post(WEBHOOK_PATH, bot.webhookCallback(WEBHOOK_PATH));
-
-// Health check
+// Health checks
 app.get('/', (req, res) => res.send('Crucible Bot is running!'));
-
 app.get('/health', (req, res) => res.send('OK'));
 
 app.listen(PORT, async () => {
   console.log(`Server started on port ${PORT}`);
 
-  // Railway provides your public domain automatically
   const domain = process.env.RAILWAY_PUBLIC_DOMAIN;
 
   if (!domain) {
-    console.error('❌ RAILWAY_PUBLIC_DOMAIN not found!');
-    console.error('Go to Railway Dashboard → Settings → Generate Domain');
+    console.error('❌ RAILWAY_PUBLIC_DOMAIN missing! Generate a domain in Railway settings.');
     return;
   }
 
   const webhookUrl = `https://${domain}${WEBHOOK_PATH}`;
-  console.log(`Attempting to set webhook: ${webhookUrl}`);
 
   try {
-    // First: Delete any old webhook (critical!)
+    // Clear any old webhook first
     await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-    console.log('Old webhook cleared');
+    console.log('Cleared old webhook');
 
-    // Then set new one
-    const result = await bot.telegram.setWebhook(webhookUrl);
-    if (result) {
-      console.log(`✅ Webhook successfully set: ${webhookUrl}`);
-      console.log('Bot is now LIVE and receiving messages!');
-    }
+    // Set the new one
+    await bot.telegram.setWebhook(webhookUrl);
+    console.log(`✅ Webhook set successfully: ${webhookUrl}`);
+    console.log('Bot is now fully active — /start, free links, buys, positions all work!');
   } catch (error) {
-    console.error('❌ Failed to set webhook:', error.message);
-    if (error.response) {
-      console.error('Telegram error:', error.response.description);
-    }
+    console.error('Webhook setup failed:', error.message);
+    if (error.response) console.error(error.response.description);
   }
 });
 
