@@ -832,7 +832,7 @@ bot.action('close_pos', async ctx => {
 
 bot.action('noop', ctx => ctx.answerCbQuery());
 
-// === INACTIVITY CHECKER (every hour now) ===
+// === INACTIVITY CHECKER (every hour) ===
 setInterval(() => {
   const now = Date.now();
   for (const [userId, last] of userLastActivity.entries()) {
@@ -841,46 +841,35 @@ setInterval(() => {
       userLastActivity.delete(userId);
     }
   }
-}, 3600000); // Hourly
+}, 3600000);
 
-// === SIMPLE POLLING MODE (WORKS EVERYWHERE, INCLUDING RAILWAY) ===
-// === FORCE DELETE WEBHOOK + START POLLING ===
-(async () => {
-  try {
-    // This deletes any existing webhook
-    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-    console.log('✅ Any old webhook deleted — polling will now work');
-  } catch (err) {
-    console.log('No webhook to delete or error (this is fine):', err.message);
-  }
-
-  // Now start polling
+// === CLEAR ANY OLD WEBHOOK & START POLLING (SAFE & SIMPLE) ===
+bot.telegram.deleteWebhook({ drop_pending_updates: true }).then(() => {
+  console.log('Old webhook cleared (if any)');
+  
   bot.launch({
     dropPendingUpdates: true
   }).then(() => {
-    console.log('🚀 Bot launched successfully with polling!');
-    console.log('Now responding to /start, free links (?start=free200), buys, positions, etc.');
+    console.log('Bot successfully launched with polling!');
+    console.log('Ready for /start, free links, buys, positions...');
   }).catch(err => {
-    console.error('Bot launch failed:', err);
+    console.error('Launch failed:', err);
   });
-})();
+}).catch(err => {
+  console.log('No webhook to clear or error (normal):', err.message);
+  
+  // Still try to launch polling
+  bot.launch({
+    dropPendingUpdates: true
+  });
+});
 
 // Graceful shutdown
-process.once('SIGINT', () => {
-  console.log('Stopping bot...');
-  bot.stop('SIGINT');
-  db.close();
-});
-process.once('SIGTERM', () => {
-  console.log('Stopping bot...');
-  bot.stop('SIGTERM');
-  db.close();
-});
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
-// Health server for Railway (keeps app awake)
+// Health server for Railway
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Crucible Bot Running (Polling Mode)'));
+app.get('/', (req, res) => res.send('Crucible Bot Alive (Polling)'));
 app.get('/health', (req, res) => res.send('OK'));
-app.listen(PORT, () => {
-  console.log(`Health server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Health server on port ${PORT}`));
