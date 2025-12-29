@@ -843,52 +843,30 @@ setInterval(() => {
   }
 }, 3600000); // Hourly
 
-// === CORRECT & WORKING WEBHOOK SETUP FOR RAILWAY ===
+// === SIMPLE POLLING MODE (WORKS EVERYWHERE, INCLUDING RAILWAY) ===
+bot.launch({
+  dropPendingUpdates: true  // Clears old messages on start
+}).then(() => {
+  console.log('Bot started successfully with polling!');
+  console.log('Bot is now responding to /start, free links, buys, positions, etc.');
+});
+
+// Enable graceful stop
+process.once('SIGINT', () => {
+  console.log('Stopping bot...');
+  bot.stop('SIGINT');
+  db.close();
+});
+process.once('SIGTERM', () => {
+  console.log('Stopping bot...');
+  bot.stop('SIGTERM');
+  db.close();
+});
+
+// Keep Express server alive for Railway health checks
 const PORT = process.env.PORT || 3000;
-const WEBHOOK_PATH = '/webhook'; // Simple fixed path
-
-// THIS LINE IS CRITICAL — mount the webhook handler
-app.use(WEBHOOK_PATH, bot.webhookCallback(WEBHOOK_PATH));
-
-// Health checks
-app.get('/', (req, res) => res.send('Crucible Bot is running!'));
+app.get('/', (req, res) => res.send('Crucible Bot is running (polling mode)'));
 app.get('/health', (req, res) => res.send('OK'));
-
-app.listen(PORT, async () => {
-  console.log(`Server started on port ${PORT}`);
-
-  const domain = process.env.RAILWAY_PUBLIC_DOMAIN;
-
-  if (!domain) {
-    console.error('❌ RAILWAY_PUBLIC_DOMAIN missing! Generate a domain in Railway settings.');
-    return;
-  }
-
-  const webhookUrl = `https://${domain}${WEBHOOK_PATH}`;
-
-  try {
-    // Clear any old webhook first
-    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-    console.log('Cleared old webhook');
-
-    // Set the new one
-    await bot.telegram.setWebhook(webhookUrl);
-    console.log(`✅ Webhook set successfully: ${webhookUrl}`);
-    console.log('Bot is now fully active — /start, free links, buys, positions all work!');
-  } catch (error) {
-    console.error('Webhook setup failed:', error.message);
-    if (error.response) console.error(error.response.description);
-  }
-});
-
-// Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('Shutting down...');
-  db.close();
-  process.exit();
-});
-process.on('SIGTERM', () => {
-  console.log('Shutting down...');
-  db.close();
-  process.exit();
+app.listen(PORT, () => {
+  console.log(`Health server running on port ${PORT}`);
 });
