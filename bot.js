@@ -72,6 +72,10 @@ db.serialize(() => {
     pay_amount REAL,
     date INTEGER
   )`);
+  // Add realized_peak column if not exists
+  db.run(`ALTER TABLE users ADD COLUMN realized_peak REAL`, () => {});
+// Initialize existing users to their start_balance
+  db.run(`UPDATE users SET realized_peak = start_balance WHERE realized_peak IS NULL`, () => {});
 });
 
 // Backward compatibility
@@ -684,6 +688,21 @@ PnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}
   `.trim()));
 
   await showPositions(ctx);
+  // After successful sell and DB commit
+const openPositionsCount = await new Promise(resolve => 
+  db.get('SELECT COUNT(*) as count FROM positions WHERE user_id = ?', [userId], (_, row) => resolve(row.count))
+);
+
+// Only update realized peak when user has NO open positions (all profits locked in)
+if (openPositionsCount === 0) {
+  const currentEquity = user.balance; // When no positions, equity = cash balance
+
+  const currentRealizedPeak = user.realized_peak || user.start_balance;
+
+  if (currentEquity > currentRealizedPeak) {
+    db.run('UPDATE users SET realized_peak = ? WHERE user_id = ?', [currentEquity, userId]);
+  }
+}
 });
 
 // Remove the old ACTIVE_POSITION_PANELS Map usage for intervals — we don't need it anymore
@@ -747,19 +766,21 @@ async function renderPanel(userId, chatId, messageId) {
       });
     }
 
-    // === FAIR EQUITY & DRAWDOWN CALCULATION ===
-    const positionCurrentValue = positionCost + totalPnL; // Current fair value of all positions
-    const equity = user.balance + positionCurrentValue;   // Cash left + what positions are worth now
+    // === REALIZED-PROFITS-ONLY PEAK & DRAWDOWN ===
+    const positionCurrentValue = positionCost + totalPnL;
+    const equity = user.balance + positionCurrentValue;   // Fair current equity
 
-    // Update peak equity
-    let peak = user.peak_equity || user.start_balance;
-    if (equity > peak) {
-      peak = equity;
-      db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [peak, userId]);
-    }
+    // Realized peak: starts at start_balance, only increases after sells lock in profit
+    // This value is updated ONLY in the sell handler when positions are closed
+    let realizedPeak = user.realized_peak || user.start_balance;
 
-    // Trailing drawdown from peak — only real losses count
-    const drawdown = equity < peak ? ((peak - equity) / peak) * 100 : 0;
+    // NO update to peak on unrealized gains — prevents fake tight drawdown on pumps
+    // Peak stays fixed until user actually realizes profit
+
+    // Trailing drawdown calculated only from the realized peak
+    const drawdown = equity < realizedPeak 
+      ? ((realizedPeak - equity) / realizedPeak) * 100 
+      : 0;
 
     // Breach & pass checks
     if (user.failed === 0) {
@@ -770,6 +791,9 @@ async function renderPanel(userId, chatId, messageId) {
         db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId]);
       }
     }
+
+    // For display — show the realized peak (not changing on unrealized moves)
+    const displayPeak = realizedPeak.toFixed(2);
 
     // Status
     let status = '';
