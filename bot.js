@@ -689,6 +689,7 @@ PnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}
 // Remove the old ACTIVE_POSITION_PANELS Map usage for intervals — we don't need it anymore
 // You can keep the Map if you want for future features, but no interval
 
+// === POSITIONS PANEL — MANUAL REFRESH ONLY (SAFE & SCALABLE) ===
 async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update.callback_query.from.id;
   const chatId = ctx.chat?.id || ctx.update.callback_query.message.chat.id;
@@ -696,50 +697,46 @@ async function showPositions(ctx) {
   userLastActivity.set(userId, Date.now());
 
   let messageId = ctx.update?.callback_query?.message?.message_id;
-
-  // If called from command or no existing message, send new one
   if (!messageId) {
     const sent = await ctx.replyWithMarkdownV2('Loading positions\\.\\.\\.');
     messageId = sent.message_id;
   }
 
-  // Render fresh data immediately
   await renderPanel(userId, chatId, messageId);
 }
 
 async function renderPanel(userId, chatId, messageId) {
   try {
-    // Fetch user and positions
     const [user, positions] = await Promise.all([
-      new Promise(resolve => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => resolve(row))),
-      new Promise(resolve => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => resolve(rows || [])))
+      new Promise(r => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => r(row))),
+      new Promise(r => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => r(rows || [])))
     ]);
 
-    if (!user) {
-      return; // User no longer has active challenge
-    }
+    if (!user) return;
 
     let totalPnL = 0;
+    let positionCost = 0; // Total USD originally spent on open positions
     const buttons = [];
 
     if (positions.length > 0) {
-      // Fetch live prices (cached for 30s globally — very efficient)
       const liveDataArray = await Promise.all(positions.map(p => getTokenData(p.ca)));
 
       positions.forEach((p, i) => {
         const live = liveDataArray[i];
-        const currentPrice = live.price > 0 ? live.price : p.entry_price * 0.95;
+
+        // CRITICAL: Never assume loss if price fetch fails
+        const currentPrice = live.price > 0 ? live.price : p.entry_price;
+
         const pnlUSD = (currentPrice - p.entry_price) * p.tokens_bought;
         const pnlPct = p.entry_price > 0 ? ((currentPrice - p.entry_price) / p.entry_price) * 100 : 0;
 
         totalPnL += pnlUSD;
+        positionCost += p.amount_usd;
 
-        // Position line
         buttons.push([
           { text: `${live.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}% | $${pnlUSD.toFixed(2)}`, callback_data: 'noop' }
         ]);
 
-        // Sell buttons only if still active
         if (user.failed === 0) {
           buttons.push([
             { text: '25%', callback_data: `sell_${p.id}_25` },
@@ -750,17 +747,21 @@ async function renderPanel(userId, chatId, messageId) {
       });
     }
 
-    // Equity & drawdown logic
-    const equity = user.balance + totalPnL;
-    let peak = user.peak_equity || user.start_balance;
+    // === FAIR EQUITY & DRAWDOWN CALCULATION ===
+    const positionCurrentValue = positionCost + totalPnL; // Current fair value of all positions
+    const equity = user.balance + positionCurrentValue;   // Cash left + what positions are worth now
 
+    // Update peak equity
+    let peak = user.peak_equity || user.start_balance;
     if (equity > peak) {
       peak = equity;
       db.run('UPDATE users SET peak_equity = ? WHERE user_id = ?', [peak, userId]);
     }
 
-    const drawdown = peak > user.start_balance ? ((peak - equity) / peak) * 100 : 0;
+    // Trailing drawdown from peak — only real losses count
+    const drawdown = equity < peak ? ((peak - equity) / peak) * 100 : 0;
 
+    // Breach & pass checks
     if (user.failed === 0) {
       if (drawdown >= MAX_DRAWDOWN_PERCENT) {
         db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId]);
@@ -770,7 +771,7 @@ async function renderPanel(userId, chatId, messageId) {
       }
     }
 
-    // Status prefix
+    // Status
     let status = '';
     if (user.failed === 1) status = `*FAILED — ${MAX_DRAWDOWN_PERCENT}% Drawdown*\n\n`;
     if (user.failed === 2) status = `*PASSED\\! Claim $${user.bounty} + profits*\nSend your Solana wallet\\.\n\n`;
@@ -779,15 +780,14 @@ async function renderPanel(userId, chatId, messageId) {
     const text = esc(`
 ${status}*LIVE POSITIONS*
 
-Equity       $${equity.toFixed(2)}
-Unrealized   ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
-Peak Equity  $${peak.toFixed(2)}
-Drawdown     ${drawdown.toFixed(2)}%
+Equity         $${equity.toFixed(2)}
+Unrealized     ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
+Peak Equity    $${peak.toFixed(2)}
+Drawdown       ${drawdown.toFixed(2)}%
 
 ${positions.length === 0 ? 'No open positions\\.' : ''}
     `.trim());
 
-    // Update the message
     await bot.telegram.editMessageText(chatId, messageId, null, text, {
       parse_mode: 'MarkdownV2',
       reply_markup: {
@@ -797,20 +797,19 @@ ${positions.length === 0 ? 'No open positions\\.' : ''}
           [{ text: '❌ Close Panel', callback_data: 'close_pos' }]
         ]
       }
-    }).catch(() => {}); // Ignore if message was deleted
+    }).catch(() => {});
 
   } catch (err) {
-    console.error('renderPanel error for user', userId, err);
+    console.error('renderPanel error:', err);
   }
 }
 
-// Refresh button — fetches fresh prices and updates panel
+// Buttons
 bot.action('refresh_pos', async ctx => {
   await ctx.answerCbQuery();
   await showPositions(ctx);
 });
 
-// Close button — deletes the panel
 bot.action('close_pos', async ctx => {
   await ctx.answerCbQuery();
   await ctx.deleteMessage().catch(() => {});
