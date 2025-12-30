@@ -321,9 +321,8 @@ bot.start(async ctx => {
     "Live sniping channel: @Crucibleprop",
     {
       reply_markup: {
-        inline_keyboard: [
-          [{ text: "Join Winners Only", url: "https://t.me/Crucibleprop" }],
-          [{ text: "SURVIVE OR DIE", web_app: { url: process.env.MINI_APP_URL } }]
+      inline_keyboard: [
+      [{ text: "Join Winners Only", url: "https://t.me/Crucibleprop" }]
         ]
       }
     }
