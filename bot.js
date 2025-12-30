@@ -91,7 +91,7 @@ function formatMC(marketCap) {
 async function getTokenData(ca) {
   const now = Date.now();
   const cached = priceCache.get(ca);
-  if (cached && now - cached.timestamp < 30000) { // 30 seconds instead of 5
+  if (cached && now - cached.timestamp < 15000) { // 30 seconds instead of 5
   return cached.data;
   }
 
