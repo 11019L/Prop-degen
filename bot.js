@@ -91,8 +91,8 @@ function formatMC(marketCap) {
 async function getTokenData(ca) {
   const now = Date.now();
   const cached = priceCache.get(ca);
-  if (cached && now - cached.timestamp < 5000) { // Short cache for fast updates
-    return cached.data;
+  if (cached && now - cached.timestamp < 30000) { // 30 seconds instead of 5
+  return cached.data;
   }
 
   let result = {
@@ -686,75 +686,60 @@ PnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}
   await showPositions(ctx);
 });
 
-// === MANUAL POSITIONS PANEL ===
+// Remove the old ACTIVE_POSITION_PANELS Map usage for intervals — we don't need it anymore
+// You can keep the Map if you want for future features, but no interval
+
 async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update.callback_query.from.id;
   const chatId = ctx.chat?.id || ctx.update.callback_query.message.chat.id;
 
   userLastActivity.set(userId, Date.now());
 
-  // Clear old interval
-  if (ACTIVE_POSITION_PANELS.has(userId)) {
-    clearInterval(ACTIVE_POSITION_PANELS.get(userId).intervalId);
-  }
-
   let messageId = ctx.update?.callback_query?.message?.message_id;
+
+  // If called from command or no existing message, send new one
   if (!messageId) {
-    const sent = await ctx.replyWithMarkdownV2('Loading live positions\\.\\.\\.');
+    const sent = await ctx.replyWithMarkdownV2('Loading positions\\.\\.\\.');
     messageId = sent.message_id;
   }
 
-  // Initial render
+  // Render fresh data immediately
   await renderPanel(userId, chatId, messageId);
-
-  // Auto-refresh every 5 seconds
-  const intervalId = setInterval(() => {
-    renderPanel(userId, chatId, messageId).catch(() => {});
-  }, 5000);
-
-  ACTIVE_POSITION_PANELS.set(userId, { chatId, messageId, intervalId });
 }
 
 async function renderPanel(userId, chatId, messageId) {
-  const MAX_REFRESH_INTERVAL = 5000; // 5 seconds — fast but safe
-  const startTime = Date.now();
-
   try {
-    // === 1. Fetch user and positions ===
+    // Fetch user and positions
     const [user, positions] = await Promise.all([
-      new Promise((resolve) => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => resolve(row))),
-      new Promise((resolve) => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => resolve(rows || [])))
+      new Promise(resolve => db.get('SELECT * FROM users WHERE user_id = ? AND paid = 1', [userId], (_, row) => resolve(row))),
+      new Promise(resolve => db.all('SELECT * FROM positions WHERE user_id = ?', [userId], (_, rows) => resolve(rows || [])))
     ]);
 
     if (!user) {
-      clearInterval(ACTIVE_POSITION_PANELS.get(userId)?.intervalId);
-      ACTIVE_POSITION_PANELS.delete(userId);
-      return;
+      return; // User no longer has active challenge
     }
 
-    // === 2. FORCE FRESH PRICES — Clear cache for all positions ===
-    positions.forEach(pos => priceCache.delete(pos.ca));
-
-    // === 3. Fetch live prices (in parallel) ===
     let totalPnL = 0;
     const buttons = [];
-    let liveDataArray = [];
 
     if (positions.length > 0) {
-      liveDataArray = await Promise.all(positions.map(p => getTokenData(p.ca)));
+      // Fetch live prices (cached for 30s globally — very efficient)
+      const liveDataArray = await Promise.all(positions.map(p => getTokenData(p.ca)));
 
       positions.forEach((p, i) => {
         const live = liveDataArray[i];
-        const currentPrice = live.price > 0 ? live.price : p.entry_price * 0.95; // gentle fallback
+        const currentPrice = live.price > 0 ? live.price : p.entry_price * 0.95;
         const pnlUSD = (currentPrice - p.entry_price) * p.tokens_bought;
         const pnlPct = p.entry_price > 0 ? ((currentPrice - p.entry_price) / p.entry_price) * 100 : 0;
 
         totalPnL += pnlUSD;
 
+        // Position line
         buttons.push([
           { text: `${live.symbol} ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}% | $${pnlUSD.toFixed(2)}`, callback_data: 'noop' }
         ]);
 
+        // Sell buttons only if still active
         if (user.failed === 0) {
           buttons.push([
             { text: '25%', callback_data: `sell_${p.id}_25` },
@@ -765,7 +750,7 @@ async function renderPanel(userId, chatId, messageId) {
       });
     }
 
-    // === 4. Calculate equity, peak, drawdown ===
+    // Equity & drawdown logic
     const equity = user.balance + totalPnL;
     let peak = user.peak_equity || user.start_balance;
 
@@ -775,55 +760,57 @@ async function renderPanel(userId, chatId, messageId) {
     }
 
     const drawdown = peak > user.start_balance ? ((peak - equity) / peak) * 100 : 0;
-    const breached = drawdown >= MAX_DRAWDOWN_PERCENT;
 
     if (user.failed === 0) {
-      if (breached) db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId]);
-      if (equity >= user.target) db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId]);
+      if (drawdown >= MAX_DRAWDOWN_PERCENT) {
+        db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId]);
+      }
+      if (equity >= user.target) {
+        db.run('UPDATE users SET failed = 2 WHERE user_id = ?', [userId]);
+      }
     }
 
-    // === 5. Status message ===
+    // Status prefix
     let status = '';
-    if (user.failed === 1) status = `*FAILED — ${MAX_DRAWDOWN_PERCENT}% DD*\n\n`;
-    if (user.failed === 2) status = `*PASSED\\! Claim $${user.bounty} + profits*\nSend wallet address\\.\n\n`;
-    if (user.failed === 3) status = `*FAILED — INACTIVITY*\n\n`;
-
-    const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    if (user.failed === 1) status = `*FAILED — ${MAX_DRAWDOWN_PERCENT}% Drawdown*\n\n`;
+    if (user.failed === 2) status = `*PASSED\\! Claim $${user.bounty} + profits*\nSend your Solana wallet\\.\n\n`;
+    if (user.failed === 3) status = `*FAILED — Inactivity*\n\n`;
 
     const text = esc(`
-${status}*LIVE POSITIONS* ↻ ${now}
+${status}*LIVE POSITIONS*
 
 Equity       $${equity.toFixed(2)}
-Unreal PnL   ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
-Peak         $${peak.toFixed(2)}
+Unrealized   ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
+Peak Equity  $${peak.toFixed(2)}
 Drawdown     ${drawdown.toFixed(2)}%
 
-${positions.length === 0 ? 'No open positions' : ''}
+${positions.length === 0 ? 'No open positions\\.' : ''}
     `.trim());
 
-    // === 6. Edit message ===
+    // Update the message
     await bot.telegram.editMessageText(chatId, messageId, null, text, {
       parse_mode: 'MarkdownV2',
       reply_markup: {
         inline_keyboard: [
           ...buttons,
           [{ text: '🔄 Refresh', callback_data: 'refresh_pos' }],
-          [{ text: '❌ Close', callback_data: 'close_pos' }]
+          [{ text: '❌ Close Panel', callback_data: 'close_pos' }]
         ]
       }
-    }).catch(() => {}); // Silent fail if message deleted
+    }).catch(() => {}); // Ignore if message was deleted
 
   } catch (err) {
-    console.error('renderPanel error:', err);
-    // Don't crash the interval
+    console.error('renderPanel error for user', userId, err);
   }
 }
 
+// Refresh button — fetches fresh prices and updates panel
 bot.action('refresh_pos', async ctx => {
   await ctx.answerCbQuery();
   await showPositions(ctx);
 });
 
+// Close button — deletes the panel
 bot.action('close_pos', async ctx => {
   await ctx.answerCbQuery();
   await ctx.deleteMessage().catch(() => {});
