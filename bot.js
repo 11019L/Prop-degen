@@ -806,7 +806,7 @@ ${status}*LIVE POSITIONS*
 
 Equity         $${equity.toFixed(2)}
 Unrealized     ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
-Peak Equity    $${peak.toFixed(2)}
+Peak Equity    $${displayPeak} (realized)
 Drawdown       ${drawdown.toFixed(2)}%
 
 ${positions.length === 0 ? 'No open positions\\.' : ''}
