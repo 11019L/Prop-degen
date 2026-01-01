@@ -5,10 +5,10 @@ const axios = require('axios');
 const sqlite3 = require('sqlite3').verbose();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
-const { session } = require('telegraf');
 
+// FIXED: Safe session — prevents ctx.session undefined crash
 bot.use(session({
-  defaultSession: () => ({})   // This guarantees ctx.session is ALWAYS an object, never undefined
+  defaultSession: () => ({})
 }));
 
 const app = express();
@@ -19,7 +19,6 @@ const db = new sqlite3.Database(dbPath);
 db.exec('PRAGMA journal_mode = WAL;');
 
 const ADMIN_ID = Number(process.env.ADMIN_ID);
-const ACTIVE_POSITION_PANELS = new Map(); // Now only tracks for cleanup
 const userLastActivity = new Map();
 const priceCache = new Map();
 
@@ -30,7 +29,7 @@ const MAX_TRADES_PER_DAY = 10;
 const INACTIVITY_HOURS = 48;
 const CASH_BUFFER_PERCENT = 0.05;
 
-const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'change_me_immediately'; // CHANGE THIS!
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'change_me_immediately';
 
 const TIERS = {
   20: { balance: 200, target: 500, bounty: 220 },
@@ -50,6 +49,7 @@ db.serialize(() => {
     bounty REAL,
     failed INTEGER DEFAULT 0,
     peak_equity REAL,
+    realized_peak REAL,
     entry_fee REAL,
     created_at INTEGER
   )`);
@@ -76,9 +76,9 @@ db.serialize(() => {
     pay_amount REAL,
     date INTEGER
   )`);
-  // Add realized_peak column if not exists
+
+  // Add realized_peak column + initialize
   db.run(`ALTER TABLE users ADD COLUMN realized_peak REAL`, () => {});
-// Initialize existing users to their start_balance
   db.run(`UPDATE users SET realized_peak = start_balance WHERE realized_peak IS NULL`, () => {});
 });
 
@@ -99,8 +99,8 @@ function formatMC(marketCap) {
 async function getTokenData(ca) {
   const now = Date.now();
   const cached = priceCache.get(ca);
-  if (cached && now - cached.timestamp < 15000) { // 30 seconds instead of 5
-  return cached.data;
+  if (cached && now - cached.timestamp < 15000) { // 15 seconds cache
+    return cached.data;
   }
 
   let result = {
@@ -112,7 +112,6 @@ async function getTokenData(ca) {
     decimals: 9
   };
 
-  // Overall hard timeout — prevents hanging forever
   const timeoutPromise = new Promise((_, reject) =>
     setTimeout(() => reject(new Error('Token data timeout')), 12000)
   );
@@ -120,7 +119,6 @@ async function getTokenData(ca) {
   try {
     await Promise.race([
       (async () => {
-        // 1. Jupiter Price API — fastest & most reliable for memecoins
         try {
           const res = await axios.get(`https://price.jup.ag/v6/price?ids=${ca}`, { timeout: 8000 });
           const data = res.data.data[ca];
@@ -128,14 +126,12 @@ async function getTokenData(ca) {
             result.price = data.price;
             result.symbol = data.mintSymbol || data.symbol || result.symbol;
             if (data.marketCap) result.mc = formatMC(data.marketCap);
-            // Jupiter doesn't provide liquidity/decimals directly, but price is priority
-            throw new Error('success'); // Early exit from race
+            throw new Error('success');
           }
         } catch (e) {
           if (e.message !== 'success') console.log('Jupiter price failed:', e.message);
         }
 
-        // 2. DexScreener fallback
         try {
           const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${ca}`, { timeout: 7000 });
           const pair = res.data.pairs?.find(p => p.dexId === 'raydium' && p.quoteToken?.symbol === 'SOL')
@@ -158,7 +154,6 @@ async function getTokenData(ca) {
           if (e.message !== 'success') console.log('DexScreener failed:', e.message);
         }
 
-        // 3. Birdeye fallback (uses your key if set)
         try {
           const headers = process.env.BIRDEYE_API_KEY 
             ? { 'X-API-KEY': process.env.BIRDEYE_API_KEY, 'x-chain': 'solana' }
@@ -184,7 +179,6 @@ async function getTokenData(ca) {
       timeoutPromise
     ]);
 
-    // Cache whatever we got (even if price 0)
     priceCache.set(ca, { data: result, timestamp: now });
     return result;
 
@@ -193,7 +187,7 @@ async function getTokenData(ca) {
       console.log('getTokenData timed out for', ca);
     }
     priceCache.set(ca, { data: result, timestamp: now });
-    return result; // Always returns quickly
+    return result;
   }
 }
 
@@ -454,7 +448,7 @@ async function handleBuy(ctx, ca) {
 }
 
 bot.action(/buy\|(.+)\|(.+)/, async ctx => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
 
   const ca = ctx.match[1].trim();
   let amountUSD = Number(ctx.match[2]);
@@ -603,26 +597,24 @@ If this persists, the token may not be tradable yet.
 
 // === CUSTOM AMOUNT HANDLER (Fixed) ===
 bot.action(/custom\|(.+)/, async ctx => {
-  await ctx.answerCbQuery().catch(() => {});  // Ignore old query errors
+  await ctx.answerCbQuery().catch(() => {});
 
-  // With the new middleware above, this is now 100% safe
   ctx.session.pendingBuyCA = ctx.match[1].trim();
 
   await ctx.reply('💵 Send the amount in USD (e.g., 75):');
 });
+
+
 bot.on('text', async ctx => {
   if (ctx.session?.pendingBuyCA) {
     const amount = Number(ctx.message.text.trim());
     const ca = ctx.session.pendingBuyCA;
-
-    // Safe delete
     delete ctx.session.pendingBuyCA;
 
     if (isNaN(amount) || amount <= 0) {
       return ctx.reply('❌ Invalid amount. Please send a positive number.');
     }
 
-    // Reuse buy logic with fake ctx
     const fakeCtx = {
       ...ctx,
       match: ['', ca, amount],
@@ -636,7 +628,6 @@ bot.on('text', async ctx => {
     return;
   }
 
-  // Direct CA paste (rest of your code)
   const text = ctx.message.text.trim();
   if (/^[1-9A-HJ-NP-Za-km-z]{32,48}$/i.test(text)) {
     await handleBuy(ctx, text);
@@ -645,7 +636,8 @@ bot.on('text', async ctx => {
 
 // === SELL LOGIC ===
 bot.action(/sell_(\d+)_(\d+)/, async ctx => {
-  try { await ctx.answerCbQuery(); } catch {}
+  await ctx.answerCbQuery().catch(() => {});
+
   const posId = ctx.match[1];
   const percent = Number(ctx.match[2]);
   const userId = ctx.from.id;
@@ -693,26 +685,21 @@ PnL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}
 
   await showPositions(ctx);
   // After successful sell and DB commit
-const openPositionsCount = await new Promise(resolve => 
-  db.get('SELECT COUNT(*) as count FROM positions WHERE user_id = ?', [userId], (_, row) => resolve(row.count))
-);
+// === UPDATE REALIZED PEAK ONLY WHEN NO POSITIONS LEFT ===
+  const openCount = await new Promise(r => db.get('SELECT COUNT(*) as c FROM positions WHERE user_id = ?', [userId], (_, row) => r(row?.c || 0)));
 
-// Only update realized peak when user has NO open positions (all profits locked in)
-if (openPositionsCount === 0) {
-  const currentEquity = user.balance; // When no positions, equity = cash balance
+  if (openCount === 0) {
+    const updatedUser = await new Promise(r => db.get('SELECT balance, start_balance, realized_peak FROM users WHERE user_id = ?', [userId], (_, row) => r(row)));
+    const currentEquity = updatedUser.balance;
+    const currentPeak = updatedUser.realized_peak || updatedUser.start_balance;
 
-  const currentRealizedPeak = user.realized_peak || user.start_balance;
-
-  if (currentEquity > currentRealizedPeak) {
-    db.run('UPDATE users SET realized_peak = ? WHERE user_id = ?', [currentEquity, userId]);
+    if (currentEquity > currentPeak) {
+      db.run('UPDATE users SET realized_peak = ? WHERE user_id = ?', [currentEquity, userId]);
+    }
   }
-}
 });
 
-// Remove the old ACTIVE_POSITION_PANELS Map usage for intervals — we don't need it anymore
-// You can keep the Map if you want for future features, but no interval
-
-// === POSITIONS PANEL — MANUAL REFRESH ONLY (SAFE & SCALABLE) ===
+// === POSITIONS PANEL ===
 async function showPositions(ctx) {
   const userId = ctx.from?.id || ctx.update.callback_query.from.id;
   const chatId = ctx.chat?.id || ctx.update.callback_query.message.chat.id;
@@ -738,7 +725,7 @@ async function renderPanel(userId, chatId, messageId) {
     if (!user) return;
 
     let totalPnL = 0;
-    let positionCost = 0; // Total USD originally spent on open positions
+    let positionCost = 0;
     const buttons = [];
 
     if (positions.length > 0) {
@@ -746,8 +733,6 @@ async function renderPanel(userId, chatId, messageId) {
 
       positions.forEach((p, i) => {
         const live = liveDataArray[i];
-
-        // CRITICAL: Never assume loss if price fetch fails
         const currentPrice = live.price > 0 ? live.price : p.entry_price;
 
         const pnlUSD = (currentPrice - p.entry_price) * p.tokens_bought;
@@ -770,23 +755,14 @@ async function renderPanel(userId, chatId, messageId) {
       });
     }
 
-    // === REALIZED-PROFITS-ONLY PEAK & DRAWDOWN ===
     const positionCurrentValue = positionCost + totalPnL;
-    const equity = user.balance + positionCurrentValue;   // Fair current equity
+    const equity = user.balance + positionCurrentValue;
 
-    // Realized peak: starts at start_balance, only increases after sells lock in profit
-    // This value is updated ONLY in the sell handler when positions are closed
-    let realizedPeak = user.realized_peak || user.start_balance;
+    // Realized peak only (no unrealized updates)
+    const realizedPeak = user.realized_peak || user.start_balance;
 
-    // NO update to peak on unrealized gains — prevents fake tight drawdown on pumps
-    // Peak stays fixed until user actually realizes profit
+    const drawdown = equity < realizedPeak ? ((realizedPeak - equity) / realizedPeak) * 100 : 0;
 
-    // Trailing drawdown calculated only from the realized peak
-    const drawdown = equity < realizedPeak 
-      ? ((realizedPeak - equity) / realizedPeak) * 100 
-      : 0;
-
-    // Breach & pass checks
     if (user.failed === 0) {
       if (drawdown >= MAX_DRAWDOWN_PERCENT) {
         db.run('UPDATE users SET failed = 1 WHERE user_id = ?', [userId]);
@@ -796,10 +772,6 @@ async function renderPanel(userId, chatId, messageId) {
       }
     }
 
-    // For display — show the realized peak (not changing on unrealized moves)
-    const displayPeak = realizedPeak.toFixed(2);
-
-    // Status
     let status = '';
     if (user.failed === 1) status = `*FAILED — ${MAX_DRAWDOWN_PERCENT}% Drawdown*\n\n`;
     if (user.failed === 2) status = `*PASSED\\! Claim $${user.bounty} + profits*\nSend your Solana wallet\\.\n\n`;
@@ -810,7 +782,7 @@ ${status}*LIVE POSITIONS*
 
 Equity         $${equity.toFixed(2)}
 Unrealized     ${totalPnL >= 0 ? '+' : ''}$${totalPnL.toFixed(2)}
-Peak Equity    $${displayPeak} (realized)
+Peak Equity    $${realizedPeak.toFixed(2)} (realized)
 Drawdown       ${drawdown.toFixed(2)}%
 
 ${positions.length === 0 ? 'No open positions\\.' : ''}
@@ -832,18 +804,17 @@ ${positions.length === 0 ? 'No open positions\\.' : ''}
   }
 }
 
-// Buttons
 bot.action('refresh_pos', async ctx => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
   await showPositions(ctx);
 });
 
 bot.action('close_pos', async ctx => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});
   await ctx.deleteMessage().catch(() => {});
 });
 
-bot.action('noop', ctx => ctx.answerCbQuery());
+bot.action('noop', ctx => ctx.answerCbQuery().catch(() => {}));
 
 // === INACTIVITY CHECKER (every hour) ===
 setInterval(() => {
@@ -856,33 +827,19 @@ setInterval(() => {
   }
 }, 3600000);
 
-// === CLEAR ANY OLD WEBHOOK & START POLLING (SAFE & SIMPLE) ===
 bot.telegram.deleteWebhook({ drop_pending_updates: true }).then(() => {
-  console.log('Old webhook cleared (if any)');
-  
-  bot.launch({
-    dropPendingUpdates: true
-  }).then(() => {
-    console.log('Bot successfully launched with polling!');
-    console.log('Ready for /start, free links, buys, positions...');
-  }).catch(err => {
-    console.error('Launch failed:', err);
+  console.log('Old webhook cleared');
+  bot.launch({ dropPendingUpdates: true }).then(() => {
+    console.log('Bot launched with polling!');
   });
-}).catch(err => {
-  console.log('No webhook to clear or error (normal):', err.message);
-  
-  // Still try to launch polling
-  bot.launch({
-    dropPendingUpdates: true
-  });
+}).catch(() => {
+  bot.launch({ dropPendingUpdates: true });
 });
 
-// Graceful shutdown
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
-// Health server for Railway
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Crucible Bot Alive (Polling)'));
+app.get('/', (req, res) => res.send('Crucible Bot Alive'));
 app.get('/health', (req, res) => res.send('OK'));
-app.listen(PORT, () => console.log(`Health server on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server on port ${PORT}`));
