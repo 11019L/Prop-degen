@@ -5,7 +5,11 @@ const axios = require('axios');
 const sqlite3 = require('sqlite3').verbose();
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
-bot.use(session());
+const { session } = require('telegraf');
+
+bot.use(session({
+  defaultSession: () => ({})   // This guarantees ctx.session is ALWAYS an object, never undefined
+}));
 
 const app = express();
 app.use(express.json());
@@ -599,40 +603,40 @@ If this persists, the token may not be tradable yet.
 
 // === CUSTOM AMOUNT HANDLER (Fixed) ===
 bot.action(/custom\|(.+)/, async ctx => {
-  await ctx.answerCbQuery();
+  await ctx.answerCbQuery().catch(() => {});  // Ignore old query errors
+
+  // With the new middleware above, this is now 100% safe
   ctx.session.pendingBuyCA = ctx.match[1].trim();
+
   await ctx.reply('💵 Send the amount in USD (e.g., 75):');
 });
-
 bot.on('text', async ctx => {
   if (ctx.session?.pendingBuyCA) {
     const amount = Number(ctx.message.text.trim());
     const ca = ctx.session.pendingBuyCA;
+
+    // Safe delete
     delete ctx.session.pendingBuyCA;
 
     if (isNaN(amount) || amount <= 0) {
       return ctx.reply('❌ Invalid amount. Please send a positive number.');
     }
 
-    // Simulate a callback query context for the buy handler
+    // Reuse buy logic with fake ctx
     const fakeCtx = {
       ...ctx,
       match: ['', ca, amount],
       from: ctx.from,
       answerCbQuery: () => {},
-      editMessageText: async (text, options) => {
-        // For custom buys, we reply instead of edit (no prior message to edit)
-        await ctx.replyWithMarkdownV2(text, options);
-      },
+      editMessageText: async (text, options) => await ctx.replyWithMarkdownV2(text, options),
       replyWithMarkdownV2: ctx.replyWithMarkdownV2.bind(ctx)
     };
 
-    // Reuse the same buy logic
     await bot.action(/buy\|(.+)\|(.+)/).callback(fakeCtx);
     return;
   }
 
-  // Direct CA paste
+  // Direct CA paste (rest of your code)
   const text = ctx.message.text.trim();
   if (/^[1-9A-HJ-NP-Za-km-z]{32,48}$/i.test(text)) {
     await handleBuy(ctx, text);
