@@ -1239,13 +1239,13 @@ setInterval(async () => {
 
         inactiveUsers.forEach(userId => {
           db.run(
-            'UPDATE users SET failed = 3 WHERE user_id = ? AND failed = 0 AND ? - userLastActivity > ?',
-            [userId, now, threshold],
-            function(err) {  // use function() to get this.changes
+            'UPDATE users SET failed = 3 WHERE user_id = ? AND failed = 0',
+            [userId],
+            function(err) {
               if (err) {
                 console.error(`Failed to mark user ${userId} inactive:`, err);
               } else if (this.changes > 0) {
-                console.log(`User ${userId} marked inactive (no activity in ${INACTIVITY_HOURS}h)`);
+                console.log(`User ${userId} marked inactive`);
                 userLastActivity.delete(userId);
 
                 // Notify admin
@@ -1261,14 +1261,9 @@ setInterval(async () => {
                 ).catch(() => {});
               }
               completed++;
-              if (completed === total) {
-                db.run('COMMIT', resolve);
+              if (completed === total) db.run('COMMIT', resolve);
               }
-            }
-          );
-        });
-      });
-    });
+            );
 
     console.log(`Inactivity check complete: ${inactiveUsers.length} checked.`);
   } catch (err) {
