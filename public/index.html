@@ -202,6 +202,44 @@
       }, 15 * 60 * 1000);
     }
 
+    async function pick(payUSD, balance, target, bounty) {
+  selected = { payUSD, balance, target, bounty };
+
+  document.getElementById('amount').textContent = '$' + payUSD;
+  document.getElementById('bal').textContent = balance;
+
+  document.getElementById('tiers').style.display = 'none';
+  document.getElementById('payment').style.display = 'block';
+
+  // === FETCH CURRENT SOL PRICE AUTOMATICALLY ===
+  let solPrice = 134; // fallback
+  try {
+    const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
+    const data = await res.json();
+    solPrice = data.solana.usd || solPrice;
+  } catch (e) {
+    console.error('Price fetch failed, using fallback');
+  }
+
+  // Calculate exact SOL amount needed (with small buffer for fees)
+  const solAmount = (payUSD / solPrice * 1.005).toFixed(6); // +0.5% buffer
+
+  // Show SOL amount to user
+  document.getElementById('timer').insertAdjacentHTML('beforebegin', 
+    `<p style="margin:16px 0; font-size:18px; color:#cf1020;">≈ ${solAmount} SOL (at current price)</p>`
+  );
+
+  // Proper Solana Pay QR with dynamic amount
+  const solanaPayUrl = `solana:${PAYMENT_WALLET}?amount=${solAmount}&label=Crucible%20PROP&message=$${payUSD}%20Challenge`;
+  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=230x230&data=${encodeURIComponent(solanaPayUrl)}`;
+
+  const img = new Image();
+  img.src = qrUrl;
+  img.onload = () => {
+    document.getElementById('qr').innerHTML = '';
+    document.getElementById('qr').appendChild(img);
+  };
+
     function updateTimer() {
       if (!startTime) return;
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
