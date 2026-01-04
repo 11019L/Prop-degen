@@ -226,6 +226,162 @@ async function getSellQuote(ca, tokensToSell, decimals = 9) {
 
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
+
+const express = require('express');
+app.use(express.json()); // already have this
+
+// === AUTOMATIC PAYMENT SYSTEM ===
+const pendingPayments = new Map(); // userId → { payAmount, timestamp, confirmed }
+
+// Clean up old pending payments every minute
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, data] of pendingPayments.entries()) {
+    if (now - data.timestamp > 15 * 60 * 1000) { // 15 minutes
+      pendingPayments.delete(userId);
+    }
+  }
+}, 60000);
+
+// 1. Mini App calls this when user selects a tier
+app.post('/start-payment', (req, res) => {
+  const { userId, payAmount } = req.body;
+
+  if (!userId || ![20, 30, 40, 50].includes(payAmount)) {
+    return res.json({ ok: false, error: 'Invalid request' });
+  }
+
+  pendingPayments.set(Number(userId), {
+    payAmount,
+    timestamp: Date.now(),
+    confirmed: false
+  });
+
+  console.log(`Payment started: User ${userId} expecting $${payAmount}`);
+  res.json({ ok: true });
+});
+
+// 2. Mini App polls this to check if paid
+app.post('/check-payment', (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.json({ ok: false });
+
+  const pending = pendingPayments.get(Number(userId));
+
+  if (pending && pending.confirmed) {
+    pendingPayments.delete(Number(userId));
+    return res.json({ ok: true });
+  }
+
+  res.json({ ok: false });
+});
+
+// 3. Helius calls this when SOL is received
+app.post('/helius-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  try {
+    // === SECURITY: Verify it's really Helius ===
+    const EXPECTED_AUTH = process.env.HELIUS_AUTH_HEADER; // e.g., "Bearer abc123xyz"
+    if (!EXPECTED_AUTH) {
+      console.error('HELIUS_AUTH_HEADER not set!');
+      return res.status(500).send('Server misconfigured');
+    }
+
+    const authHeader = req.headers.authorization || '';
+    if (authHeader !== EXPECTED_AUTH) {
+      console.log('Unauthorized webhook attempt');
+      return res.status(401).send('Unauthorized');
+    }
+
+    const payload = JSON.parse(req.body.toString());
+
+    for (const txn of payload) {
+      // Look for SOL transfers to your wallet
+      const transfers = txn.nativeTransfers || [];
+      const ourTransfer = transfers.find(t => 
+        t.toUserAccount === 'B4427oKJc3xnQf91kwXHX27u1SsVyB8GDQtc3NBxRtkK'
+      );
+
+      if (!ourTransfer) continue;
+
+      const receivedSOL = ourTransfer.amount / 1e9;
+
+      // Map expected SOL → USD tier (adjust these when SOL price changes significantly)
+      const SOL_TO_USD = {
+        0.12: 20,   // ~$20 when SOL ≈ $166
+        0.18: 30,   // ~$30
+        0.24: 40,   // ~$40
+        0.30: 50    // ~$50
+      };
+
+      let matchedPay = null;
+      for (const [expectedSOL, usd] of Object.entries(SOL_TO_USD)) {
+        if (Math.abs(receivedSOL - Number(expectedSOL)) < 0.01) { // ±0.01 SOL tolerance
+          matchedPay = usd;
+          break;
+        }
+      }
+
+      if (!matchedPay) continue;
+
+      // Find which pending user this matches
+      let fundedUserId = null;
+      for (const [userId, data] of pendingPayments.entries()) {
+        if (data.payAmount === matchedPay && !data.confirmed) {
+          fundedUserId = Number(userId);
+          data.confirmed = true;
+          break;
+        }
+      }
+
+      if (!fundedUserId) {
+        console.log(`Payment received ($${matchedPay}) but no pending user`);
+        continue;
+      }
+
+      // === AUTO-FUND THE ACCOUNT ===
+      const tier = TIERS[matchedPay];
+
+      await new Promise((resolve) => {
+        db.run('BEGIN TRANSACTION');
+        db.run(`INSERT OR REPLACE INTO users 
+          (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity, realized_peak, entry_fee, created_at)
+          VALUES (?, 1, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+          [fundedUserId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance, tier.balance, matchedPay, Date.now()],
+          () => {}
+        );
+        db.run('DELETE FROM positions WHERE user_id = ?', [fundedUserId], () => {});
+        db.run('COMMIT', resolve);
+      });
+
+      // Notify user
+      await bot.telegram.sendMessage(fundedUserId, 
+        `*CRUCIBLE ACCOUNT FUNDED AUTOMATICALLY!*\n\n` +
+        `Capital: $${tier.balance}\n` +
+        `Target: $${tier.target}\n` +
+        `Max Drawdown: 35%\n\n` +
+        `Paste any Solana token address to start trading.`,
+        { 
+          parse_mode: 'MarkdownV2',
+          reply_markup: { inline_keyboard: [[{ text: "📊 Positions", callback_data: "refresh_pos" }]] }
+        }
+      ).catch(() => {});
+
+      // Notify admin
+      await bot.telegram.sendMessage(ADMIN_ID, 
+        `✅ AUTO-FUNDED: User ${fundedUserId} paid $${matchedPay} → $${tier.balance} account\nTx: ${txn.signature.slice(0,12)}...`
+      );
+
+      pendingPayments.delete(fundedUserId);
+      console.log(`Successfully auto-funded user ${fundedUserId}`);
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Helius webhook error:', err);
+    res.status(500).send('Error');
+  }
+});
+
 // === SECURE WEBHOOK FOR PAYMENTS ===
 app.post('/create-funded-wallet', async (req, res) => {
   if (req.headers['x-webhook-secret'] !== WEBHOOK_SECRET) {
