@@ -972,6 +972,244 @@ bot.action('close_pos', async ctx => {
 
 bot.action('noop', ctx => ctx.answerCbQuery().catch(() => {}));
 
+const cron = require('cron');
+
+// Daily report at 00:00 UTC
+new cron.CronJob('0 0 0 * * *', async () => {
+  try {
+    const todayStart = new Date();
+    todayStart.setUTCHours(0, 0, 0, 0);
+    const todayTimestamp = Math.floor(todayStart.getTime() / 1000);
+
+    const [totalRevenue, todayRevenue, totalUsers, active, passedToday, failedDrawdown, failedInactivity, pendingPayouts] = await Promise.all([
+      new Promise(r => db.get('SELECT SUM(entry_fee) as r FROM users WHERE paid = 1 AND entry_fee > 0', (_, row) => r(row?.r || 0))),
+      new Promise(r => db.get('SELECT SUM(entry_fee) as r FROM users WHERE paid = 1 AND entry_fee > 0 AND created_at >= ?', [todayTimestamp * 1000], (_, row) => r(row?.r || 0))),
+      new Promise(r => db.get('SELECT COUNT(*) as c FROM users WHERE paid = 1', (_, row) => r(row?.c || 0))),
+      new Promise(r => db.get('SELECT COUNT(*) as c FROM users WHERE paid = 1 AND failed = 0', (_, row) => r(row?.c || 0))),
+      new Promise(r => db.get('SELECT COUNT(*) as c FROM users WHERE failed = 2 AND created_at >= ?', [todayTimestamp * 1000], (_, row) => r(row?.c || 0))),
+      new Promise(r => db.get('SELECT COUNT(*) as c FROM users WHERE failed = 1 AND created_at >= ?', [todayTimestamp * 1000], (_, row) => r(row?.c || 0))),
+      new Promise(r => db.get('SELECT COUNT(*) as c FROM users WHERE failed = 3 AND created_at >= ?', [todayTimestamp * 1000], (_, row) => r(row?.c || 0))),
+      new Promise(r => db.get('SELECT COALESCE(SUM(bounty + (balance - start_balance)), 0) as total FROM users WHERE failed = 2', (_, row) => r(row?.total || 0)))
+    ]);
+
+    const dateStr = new Date().toUTCString().slice(0, 16);
+
+    const msg = esc(`
+*DAILY CRUCIBLE REPORT — ${dateStr}*
+
+*Revenue*
+• Today: $${todayRevenue.toFixed(2)}
+• All-time: $${totalRevenue.toFixed(2)}
+
+*Users*
+• Total paid: ${totalUsers}
+• Active challenges: ${active}
+• Passed today: ${passedToday}
+• Failed today: ${failedDrawdown} drawdown | ${failedInactivity} inactivity
+
+*Pending payouts*: $${pendingPayouts.toFixed(2)}
+    `.trim());
+
+    await bot.telegram.sendMessage(ADMIN_ID, msg, { parse_mode: 'MarkdownV2' });
+    console.log('Daily report sent');
+  } catch (err) {
+    console.error('Daily report failed:', err);
+  }
+}, null, true, 'UTC');
+
+// === ADMIN WEB DASHBOARD (Add this to your bot.js) ===
+const ADMIN_DASH_USER = process.env.ADMIN_DASH_USER || 'admin';
+const ADMIN_DASH_PASS = process.env.ADMIN_DASH_PASS;
+
+if (!ADMIN_DASH_PASS) {
+  console.warn('ADMIN_DASH_PASS not set — admin dashboard disabled');
+}
+
+// Basic Auth Middleware
+const adminAuth = (req, res, next) => {
+  const auth = req.headers.authorization || '';
+  if (!auth.startsWith('Basic ')) {
+    return res.set('WWW-Authenticate', 'Basic realm="Crucible Admin"').status(401).send('Login required');
+  }
+
+  const credentials = Buffer.from(auth.split(' ')[1], 'base64').toString();
+  const [username, password] = credentials.split(':');
+
+  if (username === ADMIN_DASH_USER && password === ADMIN_DASH_PASS) {
+    return next();
+  }
+
+  res.status(401).send('Invalid credentials');
+};
+
+// Shared HTML styling
+const dashboardStyle = `
+<style>
+  body { margin:0; padding:0; background:#000; color:#f5f5f0; font-family:Arial,sans-serif; }
+  .container { max-width:1200px; margin:20px auto; padding:20px; }
+  h1 { color:#cf1020; text-align:center; text-shadow:0 0 15px #cf1020; margin-bottom:40px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:20px; margin:40px 0; }
+  .card { background:#111; border:2px solid #cf1020; border-radius:12px; padding:20px; text-align:center; box-shadow:0 0 20px rgba(207,16,32,0.4); }
+  .card h3 { margin:0 0 12px; color:#cf1020; font-size:18px; }
+  .card p { margin:0; font-size:28px; font-weight:bold; }
+  table { width:100%; border-collapse:collapse; background:#111; border:2px solid #cf1020; border-radius:12px; overflow:hidden; margin:30px 0; }
+  th { background:#cf1020; color:#000; padding:14px; text-align:left; }
+  td { padding:12px; border-bottom:1px solid #333; }
+  tr:hover { background:#222; }
+  .btn { background:#cf1020; color:#000; border:none; padding:8px 16px; border-radius:8px; cursor:pointer; font-weight:bold; font-size:14px; }
+  .btn:hover { background:#e05060; }
+  .search { width:100%; padding:14px; margin:20px 0; background:#111; border:2px solid #cf1020; color:#f5f5f0; border-radius:8px; font-size:16px; box-sizing:border-box; }
+  .back { display:block; text-align:center; margin:40px 0; color:#cf1020; font-weight:bold; text-decoration:none; font-size:18px; }
+  .status-active { color:#0f0; font-weight:bold; }
+  .status-passed { color:#cf1020; font-weight:bold; }
+  .status-failed { color:#888; }
+  form { display:inline; }
+  input[type=text] { background:#000; color:#fff; border:1px solid #cf1020; padding:6px; border-radius:4px; margin-right:8px; }
+</style>
+`;
+
+// Main Dashboard
+app.get('/admin', adminAuth, async (req, res) => {
+  try {
+    const stats = await Promise.all([
+      db.get('SELECT SUM(entry_fee) as revenue FROM users WHERE paid = 1'),
+      db.get('SELECT SUM(entry_fee) as today FROM users WHERE paid = 1 AND date(created_at/1000,"unixepoch") = date("now")'),
+      db.get('SELECT COUNT(*) as total FROM users WHERE paid = 1'),
+      db.get('SELECT COUNT(*) as active FROM users WHERE paid = 1 AND failed = 0'),
+      db.get('SELECT COUNT(*) as passed FROM users WHERE failed = 2'),
+      db.get('SELECT COALESCE(SUM(bounty + (balance - start_balance)),0) as pending FROM users WHERE failed = 2 AND payout_sent = 0'),
+      db.all('SELECT user_id, entry_fee, balance, failed, created_at FROM users WHERE paid = 1 ORDER BY created_at DESC LIMIT 15'),
+      db.all('SELECT user_id, payout_address, bounty, balance, start_balance FROM users WHERE failed = 2 AND payout_sent = 0')
+    ]);
+
+    const [revenue, today, total, active, passed, pendingPayouts, recent, pendingUsers] = stats;
+
+    let html = `<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Crucible Admin</title>${dashboardStyle}</head><body><div class="container">
+      <h1>CRUCIBLE ADMIN DASHBOARD</h1>
+      <div class="cards">
+        <div class="card"><h3>Total Revenue</h3><p>$${Number(revenue?.revenue || 0).toFixed(2)}</p></div>
+        <div class="card"><h3>Today's Revenue</h3><p>$${Number(today?.today || 0).toFixed(2)}</p></div>
+        <div class="card"><h3>Total Users</h3><p>${total?.total || 0}</p></div>
+        <div class="card"><h3>Active</h3><p>${active?.active || 0}</p></div>
+        <div class="card"><h3>Passed</h3><p>${passed?.passed || 0}</p></div>
+        <div class="card"><h3>Pending Payouts</h3><p>$${Number(pendingPayouts?.pending || 0).toFixed(2)}</p></div>
+      </div>`;
+
+    if (pendingUsers.length > 0) {
+      html += `<h2 style="color:#cf1020;">Pending Payouts (${pendingUsers.length})</h2><table><thead><tr>
+        <th>User ID</th><th>Wallet</th><th>Bounty</th><th>Profit</th><th>Total Owed</th><th>Action</th>
+      </tr></thead><tbody>`;
+      for (const u of pendingUsers) {
+        const profit = (u.balance - u.start_balance).toFixed(2);
+        const total = (u.bounty + (u.balance - u.start_balance)).toFixed(2);
+        html += `<tr>
+          <td>${u.user_id}</td>
+          <td>${u.payout_address || '<i>Not set</i>'}</td>
+          <td>$${u.bounty}</td>
+          <td>$${profit}</td>
+          <td><strong>$${total}</strong></td>
+          <td>
+            <form action="/admin/mark-paid" method="POST">
+              <input type="hidden" name="userId" value="${u.user_id}">
+              <input type="text" name="tx" placeholder="Tx hash" required>
+              <button type="submit" class="btn">Mark Paid</button>
+            </form>
+          </td>
+        </tr>`;
+      }
+      html += `</tbody></table>`;
+    }
+
+    html += `<h2 style="color:#cf1020;margin-top:50px;">Recent Activity</h2><table><thead><tr>
+      <th>User ID</th><th>Tier</th><th>Status</th><th>Equity</th><th>Joined</th>
+    </tr></thead><tbody>`;
+    for (const u of recent) {
+      const status = u.failed === 0 ? 'Active' : u.failed === 2 ? 'Passed' : 'Failed';
+      const statusClass = u.failed === 0 ? 'status-active' : u.failed === 2 ? 'status-passed' : 'status-failed';
+      html += `<tr>
+        <td>${u.user_id}</td>
+        <td>$${u.entry_fee || 'Free'}</td>
+        <td class="${statusClass}">${status}</td>
+        <td>$${Number(u.balance).toFixed(2)}</td>
+        <td>${new Date(u.created_at).toLocaleString()}</td>
+      </tr>`;
+    }
+    html += `</tbody></table>
+      <p style="text-align:center;"><a href="/admin/users" style="color:#cf1020;font-weight:bold;font-size:18px;">View All Users →</a></p>
+      </div></body></html>`;
+
+    res.send(html);
+  } catch (err) {
+    console.error('Dashboard error:', err);
+    res.status(500).send('Server error');
+  }
+});
+
+// All Users Page
+app.get('/admin/users', adminAuth, async (req, res) => {
+  try {
+    const users = await db.all('SELECT user_id, entry_fee, balance, failed, created_at, payout_sent FROM users WHERE paid = 1 ORDER BY created_at DESC');
+
+    let html = `<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>All Users</title>${dashboardStyle}</head><body><div class="container">
+      <h1>All Users (${users.length})</h1>
+      <input type="text" class="search" placeholder="Search User ID..." onkeyup="let v=this.value.toLowerCase(); document.querySelectorAll('tbody tr').forEach(r=>r.style.display=r.textContent.toLowerCase().includes(v)?'':'none')">
+      <table><thead><tr>
+        <th>User ID</th><th>Tier</th><th>Equity</th><th>Status</th><th>Payout</th><th>Joined</th>
+      </tr></thead><tbody>`;
+
+    for (const u of users) {
+      const status = u.failed === 0 ? 'Active' : u.failed === 2 ? 'Passed' : 'Failed';
+      const statusClass = u.failed === 0 ? 'status-active' : u.failed === 2 ? 'status-passed' : 'status-failed';
+      const payout = u.failed === 2 ? (u.payout_sent ? 'Paid' : 'Pending') : '-';
+      html += `<tr>
+        <td>${u.user_id}</td>
+        <td>$${u.entry_fee || 'Free'}</td>
+        <td>$${Number(u.balance).toFixed(2)}</td>
+        <td class="${statusClass}">${status}</td>
+        <td>${payout}</td>
+        <td>${new Date(u.created_at).toLocaleDateString()}</td>
+      </tr>`;
+    }
+
+    html += `</tbody></table>
+      <a href="/admin" class="back">← Back to Dashboard</a>
+      </div></body></html>`;
+
+    res.send(html);
+  } catch (err) {
+    res.status(500).send('Error');
+  }
+});
+
+// Mark Paid Endpoint
+app.post('/admin/mark-paid', adminAuth, express.urlencoded({extended: true}), async (req, res) => {
+  const { userId, tx } = req.body;
+  if (!userId || !tx?.trim()) return res.redirect('/admin');
+
+  try {
+    const user = await db.get('SELECT user_id, bounty, balance, start_balance FROM users WHERE user_id = ? AND failed = 2 AND payout_sent = 0', [userId]);
+    if (!user) return res.redirect('/admin');
+
+    await db.run('UPDATE users SET payout_tx = ?, payout_sent = 1 WHERE user_id = ?', [tx.trim(), userId]);
+
+    const profit = user.balance - user.start_balance;
+    const total = user.bounty + profit;
+
+    await bot.telegram.sendMessage(userId, 
+      `*🎉 PAYOUT SENT!*\n\n` +
+      `Amount: $${total.toFixed(2)}\n` +
+      `Transaction: \`${tx.trim()}\`\n\n` +
+      `Thank you for trading with Crucible!`,
+      { parse_mode: 'MarkdownV2' }
+    ).catch(() => {});
+
+    res.redirect('/admin');
+  } catch (err) {
+    console.error('Mark paid error:', err);
+    res.redirect('/admin');
+  }
+});
+
 // === IMPROVED INACTIVITY CHECKER ===
 setInterval(async () => {
   const now = Date.now();
