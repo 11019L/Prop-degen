@@ -971,7 +971,6 @@ bot.action('close_pos', async ctx => {
 
 bot.action('noop', ctx => ctx.answerCbQuery().catch(() => {}));
 
-const cron = require('cron');
 
 // Daily report at 00:00 UTC
 new cron.CronJob('0 0 0 * * *', async () => {
