@@ -13,6 +13,7 @@ bot.use(session({
 
 const app = express();
 app.use(express.json());  // ONLY ONE TIME
+app.use('/miniapp', express.static('public/index.html'));
 
 const dbPath = process.env.DB_PATH || '/data/crucible.db';
 const db = new sqlite3.Database(dbPath);
