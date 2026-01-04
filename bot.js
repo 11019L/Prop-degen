@@ -816,16 +816,74 @@ bot.action('close_pos', async ctx => {
 
 bot.action('noop', ctx => ctx.answerCbQuery().catch(() => {}));
 
-// === INACTIVITY CHECKER (every hour) ===
-setInterval(() => {
+// === IMPROVED INACTIVITY CHECKER ===
+setInterval(async () => {
   const now = Date.now();
+  const threshold = INACTIVITY_HOURS * 3600000; // 48 hours in ms
+
+  const inactiveUsers = [];
   for (const [userId, last] of userLastActivity.entries()) {
-    if (now - last > INACTIVITY_HOURS * 3600000) {
-      db.run('UPDATE users SET failed = 3 WHERE user_id = ? AND failed = 0', [userId]);
-      userLastActivity.delete(userId);
+    if (now - last > threshold) {
+      inactiveUsers.push(userId);
     }
   }
-}, 3600000);
+
+  if (inactiveUsers.length === 0) return;
+
+  console.log(`Checking ${inactiveUsers.length} potentially inactive users...`);
+
+  try {
+    await new Promise((resolve, reject) => {
+      db.run('BEGIN TRANSACTION', err => {
+        if (err) return reject(err);
+
+        let completed = 0;
+        const total = inactiveUsers.length;
+
+        if (total === 0) {
+          db.run('COMMIT', resolve);
+          return;
+        }
+
+        inactiveUsers.forEach(userId => {
+          db.run(
+            'UPDATE users SET failed = 3 WHERE user_id = ? AND failed = 0 AND ? - userLastActivity > ?',
+            [userId, now, threshold],
+            function(err) {  // use function() to get this.changes
+              if (err) {
+                console.error(`Failed to mark user ${userId} inactive:`, err);
+              } else if (this.changes > 0) {
+                console.log(`User ${userId} marked inactive (no activity in ${INACTIVITY_HOURS}h)`);
+                userLastActivity.delete(userId);
+
+                // Notify admin
+                bot.telegram.sendMessage(ADMIN_ID, 
+                  `⚠️ User ${userId} failed due to inactivity (${INACTIVITY_HOURS}h no interaction)`
+                ).catch(() => {});
+
+                // Optional: notify user
+                bot.telegram.sendMessage(userId,
+                  '❌ Your challenge has been failed due to inactivity.\n\n' +
+                  `No interaction detected in the last ${INACTIVITY_HOURS} hours.\n` +
+                  'Contact support if you believe this is an error.'
+                ).catch(() => {});
+              }
+              completed++;
+              if (completed === total) {
+                db.run('COMMIT', resolve);
+              }
+            }
+          );
+        });
+      });
+    });
+
+    console.log(`Inactivity check complete: ${inactiveUsers.length} checked.`);
+  } catch (err) {
+    console.error('Inactivity checker transaction failed:', err);
+    // On error, rollback is automatic in SQLite
+  }
+}, 3600000); // Every hour
 
 bot.telegram.deleteWebhook({ drop_pending_updates: true }).then(() => {
   console.log('Old webhook cleared');
