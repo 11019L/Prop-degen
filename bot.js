@@ -1,18 +1,18 @@
 require('dotenv').config();
 const { Telegraf, session } = require('telegraf');
-const express = require('express');
+const express = require('express');  // ONLY ONE TIME
 const axios = require('axios');
 const sqlite3 = require('sqlite3').verbose();
+const cron = require('cron');        // Add this if not installed: npm install cron
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// FIXED: Safe session — prevents ctx.session undefined crash
 bot.use(session({
   defaultSession: () => ({})
 }));
 
 const app = express();
-app.use(express.json());
+app.use(express.json());  // ONLY ONE TIME
 
 const dbPath = process.env.DB_PATH || '/data/crucible.db';
 const db = new sqlite3.Database(dbPath);
@@ -80,6 +80,9 @@ db.serialize(() => {
   // Add realized_peak column + initialize
   db.run(`ALTER TABLE users ADD COLUMN realized_peak REAL`, () => {});
   db.run(`UPDATE users SET realized_peak = start_balance WHERE realized_peak IS NULL`, () => {});
+  db.run('ALTER TABLE users ADD COLUMN payout_address TEXT', () => {});
+  db.run('ALTER TABLE users ADD COLUMN payout_tx TEXT', () => {});
+  db.run('ALTER TABLE users ADD COLUMN payout_sent INTEGER DEFAULT 0', () => {});
 });
 
 // Backward compatibility
@@ -227,17 +230,13 @@ async function getSellQuote(ca, tokensToSell, decimals = 9) {
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
 
-const express = require('express');
-app.use(express.json()); // already have this
+const pendingPayments = new Map();
 
-// === AUTOMATIC PAYMENT SYSTEM ===
-const pendingPayments = new Map(); // userId → { payAmount, timestamp, confirmed }
-
-// Clean up old pending payments every minute
+// Clean up old pending payments
 setInterval(() => {
   const now = Date.now();
   for (const [userId, data] of pendingPayments.entries()) {
-    if (now - data.timestamp > 15 * 60 * 1000) { // 15 minutes
+    if (now - data.timestamp > 15 * 60 * 1000) {
       pendingPayments.delete(userId);
     }
   }
