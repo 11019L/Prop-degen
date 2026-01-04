@@ -5,99 +5,198 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Crucible PROP</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script src="https://unpkg.com/@solana/web3.js@1.95.3/lib/index.iife.min.js"></script>
-  <script src="https://unpkg.com/bip39@3.1.0/dist/index.browser.min.js"></script>
-  <script src="https://unpkg.com/ed25519-hd-key@1.3.0/dist/index.min.js"></script>
   <style>
-    body { margin:0; padding:20px; background:#000; color:#f5f5f0; font-family:Arial; text-align:center; }
-    h1 { font-size:28px; margin:0 0 8px; text-shadow:0 0 15px #cf1020; color:#cf1020; }
-    h2 { color:#cf1020; }
-    .tiers { display:flex; flex-direction:column; gap:15px; max-width:340px; margin:30px auto 20px; }
-    .tier { background:linear-gradient(135deg,#111,#222); border:2px solid #cf1020; border-radius:16px; padding:22px; font-size:21px; font-weight:bold; color:#f5f5f0; cursor:pointer; box-shadow:0 0 20px rgba(207,16,32,0.5); transition:all 0.3s; }
-    .tier:hover { transform:scale(1.05); box-shadow:0 0 30px rgba(207,16,32,0.8); }
-    .tier span { display:block; font-size:16px; color:#aaa; margin-top:6px; font-weight:normal; }
-    #payment, #success { display:none; margin-top:40px; }
-    .wallet { background:#111; padding:20px; border-radius:12px; margin:20px auto; max-width:90%; word-break:break-all; font-family:monospace; font-size:17px; line-height:1.8; border:2px solid #cf1020; color:#f5f5f0; box-shadow:0 0 15px #cf1020; }
-    .warning { color:#cf1020; font-weight:bold; margin:20px 0; }
-    #qr img { max-width: 200px; margin:20px auto; display:block; border:2px solid #cf1020; border-radius:8px; }
+    body { 
+      margin:0; padding:20px; background:#000; color:#f5f5f0; 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; 
+      text-align:center; 
+    }
+    h1 { 
+      font-size:28px; margin:0 0 8px; 
+      text-shadow:0 0 15px #cf1020; color:#cf1020; 
+    }
+    p.subtitle { color:#aaa; margin:0 0 30px; font-size:16px; }
+    .tiers { 
+      display:flex; flex-direction:column; gap:18px; 
+      max-width:340px; margin:0 auto 40px; 
+    }
+    .tier { 
+      background:linear-gradient(135deg,#111,#222); 
+      border:2px solid #cf1020; border-radius:16px; 
+      padding:24px; font-size:22px; font-weight:bold; 
+      color:#f5f5f0; cursor:pointer; 
+      box-shadow:0 0 20px rgba(207,16,32,0.4); 
+      transition:all 0.3s ease; 
+    }
+    .tier:hover { 
+      transform:scale(1.05); 
+      box-shadow:0 0 35px rgba(207,16,32,0.8); 
+    }
+    .tier span { 
+      display:block; font-size:16px; color:#ccc; 
+      margin-top:8px; font-weight:normal; 
+    }
+    #payment, #success, #timeout { display:none; margin-top:40px; }
+    .wallet { 
+      background:#111; padding:20px; border-radius:12px; 
+      margin:25px auto; max-width:90%; word-break:break-all; 
+      font-family:monospace; font-size:18px; line-height:1.6; 
+      border:2px solid #cf1020; color:#f5f5f0; 
+      box-shadow:0 0 20px rgba(207,16,32,0.6); 
+    }
+    #qr img { 
+      max-width: 220px; margin:25px auto; display:block; 
+      border:3px solid #cf1020; border-radius:12px; 
+      box-shadow:0 0 25px rgba(207,16,32,0.7);
+    }
+    .warning { 
+      color:#cf1020; font-weight:bold; margin:20px 0; font-size:15px; 
+    }
+    .timer { 
+      color:#aaa; font-size:14px; margin-top:15px; 
+    }
   </style>
 </head>
 <body>
   <h1>Crucible PROP</h1>
-  <p style="color:#aaa;">Pay real → get funded account instantly</p>
+  <p class="subtitle">Pay real → get funded account instantly</p>
 
   <div class="tiers" id="tiers">
-    <div class="tier" onclick="pick(20,200,460,140)">$20 → $200 Account<span>Target $460 · Payout $140</span></div>
-    <div class="tier" onclick="pick(30,300,690,210)">$30 → $300 Account<span>Target $690 · Payout $210</span></div>
-    <div class="tier" onclick="pick(40,400,920,280)">$40 → $400 Account<span>Target $920 · Payout $280</span></div>
-    <div class="tier" onclick="pick(50,500,1150,350)">$50 → $500 Account<span>Target $1150 · Payout $350</span></div>
+    <div class="tier" onclick="pick(20,200,500,220)">
+      $20 → $200 Account<span>Target $500 · Payout $220</span>
+    </div>
+    <div class="tier" onclick="pick(30,300,750,330)">
+      $30 → $300 Account<span>Target $750 · Payout $330</span>
+    </div>
+    <div class="tier" onclick="pick(40,400,1000,440)">
+      $40 → $400 Account<span>Target $1000 · Payout $440</span>
+    </div>
+    <div class="tier" onclick="pick(50,500,1250,550)">
+      $50 → $500 Account<span>Target $1250 · Payout $550</span>
+    </div>
   </div>
 
   <!-- PAYMENT PAGE -->
   <div id="payment">
-    <h2>Send exactly <span id="amount" style="color:#cf1020;"></span></h2>
-    <div class="wallet" id="wallet">Loading...</div>
+    <h2>Send exactly <span id="amount" style="color:#cf1020;"></span> in SOL</h2>
+    <div class="wallet" id="wallet">Loading wallet...</div>
     <div id="qr"></div>
-    <p style="margin-top:20px; color:#cf1020;">Scan QR or copy address to pay. Confirmation automatic — funded account ready in seconds.</p>
+    <p class="warning">Use Phantom, Solflare, or any Solana wallet</p>
+    <p>Payment detected automatically in seconds</p>
+    <div class="timer" id="timer"></div>
   </div>
 
   <!-- SUCCESS PAGE -->
   <div id="success">
-    <h2 style="color:#cf1020;">FUNDED ACCOUNT READY!</h2>
-    <p>Challenge started! Head back to the bot to trade your $<span id="bal"></span> account.</p>
+    <h2 style="color:#cf1020;">FUNDED ACCOUNT ACTIVATED!</h2>
+    <p style="font-size:18px;">
+      Your $<span id="bal" style="color:#cf1020; font-weight:bold;"></span> challenge is now live.<br><br>
+      Return to the bot and paste any Solana token address to start trading.
+    </p>
+    <p style="color:#aaa; font-size:14px; margin-top:40px;">
+      Closing in 8 seconds...
+    </p>
+  </div>
+
+  <!-- TIMEOUT PAGE -->
+  <div id="timeout">
+    <h2 style="color:#cf1020;">Payment Timeout</h2>
+    <p>15 minutes passed without confirmed payment.</p>
+    <p>Refresh or try again later.</p>
   </div>
 
   <script>
     const tg = window.Telegram.WebApp;
-    tg.ready(); tg.expand();
+    tg.ready();
+    tg.expand();
 
     const MY_WALLET = "B4427oKJc3xnQf91kwXHX27u1SsVyB8GDQtc3NBxRtkK";
     document.getElementById('wallet').textContent = MY_WALLET;
 
     let selected = null;
     let intervalId = null;
+    let timeoutId = null;
+    let startTime = null;
 
     function pick(pay, balance, target, bounty) {
-      selected = {pay, balance, target, bounty};
+      selected = { pay, balance, target, bounty };
       document.getElementById('amount').textContent = '$' + pay;
+      document.getElementById('bal').textContent = balance;
       document.getElementById('tiers').style.display = 'none';
       document.getElementById('payment').style.display = 'block';
 
-      // Generate QR for wallet address (since Solana Pay doesn't work)
-      const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=solana:${MY_WALLET}?amount=${pay}`;
-      const img = document.createElement('img');
-      img.src = qrUrl;
-      document.getElementById('qr').appendChild(img);
+      // Proper Solana Pay URL (URL-encoded)
+      const solanaPayUrl = `solana:${MY_WALLET}?amount=${pay}&label=Crucible%20PROP&message=Challenge%20Purchase%20%24${pay}`;
+      const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(solanaPayUrl)}`;
 
-      // Start auto-polling for payment confirmation
+      const img = new Image();
+      img.src = qrUrl;
+      img.onload = () => {
+        document.getElementById('qr').innerHTML = '';
+        document.getElementById('qr').appendChild(img);
+      };
+
+      // Start polling for payment
+      startTime = Date.now();
+      updateTimer();
       intervalId = setInterval(checkPayment, 4000);
+      timeoutId = setTimeout(() => {
+        clearInterval(intervalId);
+        document.getElementById('payment').style.display = 'none';
+        document.getElementById('timeout').style.display = 'block';
+      }, 15 * 60 * 1000); // 15 minutes
+    }
+
+    function updateTimer() {
+      if (!startTime) return;
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      const remaining = Math.max(0, 900 - elapsed);
+      const mins = Math.floor(remaining / 60).toString().padStart(2, '0');
+      const secs = (remaining % 60).toString().padStart(2, '0');
+      document.getElementById('timer').textContent = `Time remaining: ${mins}:${secs}`;
+      if (remaining > 0) setTimeout(updateTimer, 1000);
     }
 
     async function checkPayment() {
-      if (!selected) return;
+      if (!selected || !tg.initDataUnsafe?.user) return;
+
       try {
-        const res = await fetch('https://your-bot.onrender.com/check-payment', {  // Replace with your real backend endpoint
+        // Replace with your actual backend endpoint when ready
+        const res = await fetch('https://your-bot.onrender.com/check-payment', {
           method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({userId: tg.initDataUnsafe.user.id, payAmount: selected.pay})
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: tg.initDataUnsafe.user.id,
+            payAmount: selected.pay
+          })
         });
+
         const data = await res.json();
+
         if (data.ok) {
           clearInterval(intervalId);
+          clearTimeout(timeoutId);
           document.getElementById('payment').style.display = 'none';
-          document.getElementById('bal').textContent = selected.balance;
           document.getElementById('success').style.display = 'block';
-          // Notify bot backend to send "Challenge started" message
+
+          // Trigger account creation on your backend
           await fetch('https://your-bot.onrender.com/create-funded-wallet', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({userId: tg.initDataUnsafe.user.id, payAmount: selected.pay})
+            headers: { 
+              'Content-Type': 'application/json',
+              'x-webhook-secret': 'YOUR_WEBHOOK_SECRET_HERE' // Keep this server-side only in real setup!
+            },
+            body: JSON.stringify({
+              userId: tg.initDataUnsafe.user.id,
+              payAmount: selected.pay
+            })
           });
-          // Close mini app after 5 seconds
-          setTimeout(() => tg.close(), 5000);
+
+          // Auto-close after 8 seconds
+          setTimeout(() => tg.close(), 8000);
         }
-      } catch(e) {
-        console.error('Polling error:', e);
+      } catch (e) {
+        console.error('Payment check failed:', e);
       }
     }
   </script>
