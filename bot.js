@@ -509,9 +509,9 @@ bot.start(async ctx => {
 
           db.run(`
             INSERT OR REPLACE INTO users 
-            (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity, entry_fee, created_at)
-            VALUES (?, 1, ?, ?, ?, ?, 0, ?, 0, ?)
-          `, [userId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance, Date.now()], err => {
+            (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity, realized_peak, entry_fee, created_at)
+            VALUES (?, 1, ?, ?, ?, ?, 0, ?, ?, 0, ?)
+          `, [userId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance, tier.balance, Date.now()], err => {
             if (err) reject(err);
           });
 
@@ -558,9 +558,9 @@ bot.command('admin_test', async ctx => {
 
   await new Promise(r => db.run(`
     INSERT OR REPLACE INTO users 
-    (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity, entry_fee, created_at)
-    VALUES (?, 1, ?, ?, ?, ?, 0, ?, ?, ?)
-  `, [ctx.from.id, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance, pay, Date.now()], r));
+    (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity, realized_peak, entry_fee, created_at)
+    VALUES (?, 1, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+  `, [ctx.from.id, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance, tier.balance, pay, Date.now()], r));
 
   await new Promise(r => db.run('DELETE FROM positions WHERE user_id = ?', [ctx.from.id], r));
 
@@ -1070,14 +1070,14 @@ const dashboardStyle = `
 app.get('/admin', adminAuth, async (req, res) => {
   try {
     const stats = await Promise.all([
-      db.get('SELECT SUM(entry_fee) as revenue FROM users WHERE paid = 1'),
-      db.get('SELECT SUM(entry_fee) as today FROM users WHERE paid = 1 AND date(created_at/1000,"unixepoch") = date("now")'),
-      db.get('SELECT COUNT(*) as total FROM users WHERE paid = 1'),
-      db.get('SELECT COUNT(*) as active FROM users WHERE paid = 1 AND failed = 0'),
-      db.get('SELECT COUNT(*) as passed FROM users WHERE failed = 2'),
-      db.get('SELECT COALESCE(SUM(bounty + (balance - start_balance)),0) as pending FROM users WHERE failed = 2 AND payout_sent = 0'),
-      db.all('SELECT user_id, entry_fee, balance, failed, created_at FROM users WHERE paid = 1 ORDER BY created_at DESC LIMIT 15'),
-      db.all('SELECT user_id, payout_address, bounty, balance, start_balance FROM users WHERE failed = 2 AND payout_sent = 0')
+      new Promise(r => db.get('SELECT SUM(entry_fee) as revenue FROM users WHERE paid = 1', (_, row) => r(row))),
+      new Promise(r => db.get('SELECT SUM(entry_fee) as today FROM users WHERE paid = 1 AND date(created_at/1000,"unixepoch") = date("now")', (_, row) => r(row))),
+      new Promise(r => db.get('SELECT COUNT(*) as total FROM users WHERE paid = 1', (_, row) => r(row))),
+      new Promise(r => db.get('SELECT COUNT(*) as active FROM users WHERE paid = 1 AND failed = 0', (_, row) => r(row))),
+      new Promise(r => db.get('SELECT COUNT(*) as passed FROM users WHERE failed = 2', (_, row) => r(row))),
+      new Promise(r => db.get('SELECT COALESCE(SUM(bounty + (balance - start_balance)),0) as pending FROM users WHERE failed = 2 AND payout_sent = 0', (_, row) => r(row))),
+      new Promise(r => db.all('SELECT user_id, entry_fee, balance, failed, created_at FROM users WHERE paid = 1 ORDER BY created_at DESC LIMIT 15', (_, rows) => r(rows))),
+      new Promise(r => db.all('SELECT user_id, payout_address, bounty, balance, start_balance FROM users WHERE failed = 2 AND payout_sent = 0', (_, rows) => r(rows)))
     ]);
 
     const [revenue, today, total, active, passed, pendingPayouts, recent, pendingUsers] = stats;
@@ -1146,7 +1146,7 @@ app.get('/admin', adminAuth, async (req, res) => {
 // All Users Page
 app.get('/admin/users', adminAuth, async (req, res) => {
   try {
-    const users = await db.all('SELECT user_id, entry_fee, balance, failed, created_at, payout_sent FROM users WHERE paid = 1 ORDER BY created_at DESC');
+    const users = await new Promise(r => db.all('SELECT user_id, entry_fee, balance, failed, created_at, payout_sent FROM users WHERE paid = 1 ORDER BY created_at DESC', (_, rows) => r(rows)));
 
     let html = `<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>All Users</title>${dashboardStyle}</head><body><div class="container">
       <h1>All Users (${users.length})</h1>
@@ -1185,10 +1185,10 @@ app.post('/admin/mark-paid', adminAuth, express.urlencoded({extended: true}), as
   if (!userId || !tx?.trim()) return res.redirect('/admin');
 
   try {
-    const user = await db.get('SELECT user_id, bounty, balance, start_balance FROM users WHERE user_id = ? AND failed = 2 AND payout_sent = 0', [userId]);
+    const user = await new Promise(r => db.get('SELECT user_id, bounty, balance, start_balance FROM users WHERE user_id = ? AND failed = 2 AND payout_sent = 0', [userId], (_, row) => r(row)));
     if (!user) return res.redirect('/admin');
 
-    await db.run('UPDATE users SET payout_tx = ?, payout_sent = 1 WHERE user_id = ?', [tx.trim(), userId]);
+    await new Promise(r => db.run('UPDATE users SET payout_tx = ?, payout_sent = 1 WHERE user_id = ?', [tx.trim(), userId], r));
 
     const profit = user.balance - user.start_balance;
     const total = user.bounty + profit;
@@ -1262,8 +1262,11 @@ setInterval(async () => {
               }
               completed++;
               if (completed === total) db.run('COMMIT', resolve);
-              }
-            );
+            }
+          );
+        });
+      });
+    });
 
     console.log(`Inactivity check complete: ${inactiveUsers.length} checked.`);
   } catch (err) {
