@@ -194,16 +194,38 @@ async function getTokenData(ca) {
   }
 }
 
-async function getSolPrice() {
+// === SOL PRICE AUTO-UPDATER ===
+let currentSolPrice = 150; // fallback
+
+async function updateSolPrice() {
   try {
-    const res = await axios.get('https://public-api.birdeye.so/defi/price?address=So11111111111111111111111111111111111111112', {
-      headers: { 'X-API-KEY': process.env.BIRDEYE_API_KEY },
-      timeout: 5000
-    });
-    return res.data.data?.value || 150;
-  } catch {
-    return 150;
+    const headers = process.env.BIRDEYE_API_KEY 
+      ? { 'X-API-KEY': process.env.BIRDEYE_API_KEY, 'x-chain': 'solana' }
+      : { 'x-chain': 'solana' };
+
+    const res = await axios.get(
+      'https://public-api.birdeye.so/defi/price?address=So11111111111111111111111111111111111111112',
+      { headers, timeout: 8000 }
+    );
+
+    if (res.data?.success && res.data.data?.value > 0) {
+      currentSolPrice = res.data.data.value;
+      console.log(`SOL price updated: $${currentSolPrice.toFixed(2)}`);
+    }
+  } catch (err) {
+    console.log('SOL price update failed (using cached):', err.message);
+    // Keep using the last known price
   }
+}
+
+// Initial fetch
+updateSolPrice();
+
+// Update every 45 seconds (safe interval – Birdeye allows it)
+setInterval(updateSolPrice, 45 * 1000);
+
+async function getSolPrice() {
+  return currentSolPrice; // Always returns the latest known price instantly
 }
 
 async function getSellQuote(ca, tokensToSell, decimals = 9) {
@@ -510,7 +532,7 @@ bot.start(async ctx => {
           db.run(`
             INSERT OR REPLACE INTO users 
             (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity, realized_peak, entry_fee, created_at)
-            VALUES (?, 1, ?, ?, ?, ?, 0, ?, ?, 0, ?)
+            VALUES (?, 1, ?, ?, ?, ?, 0, ?, ?, NULL, ?)
           `, [userId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance, tier.balance, Date.now()], err => {
             if (err) reject(err);
           });
@@ -559,8 +581,8 @@ bot.command('admin_test', async ctx => {
   await new Promise(r => db.run(`
     INSERT OR REPLACE INTO users 
     (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity, realized_peak, entry_fee, created_at)
-    VALUES (?, 1, ?, ?, ?, ?, 0, ?, ?, ?, ?)
-  `, [ctx.from.id, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance, tier.balance, pay, Date.now()], r));
+    VALUES (?, 1, ?, ?, ?, ?, 0, ?, ?, NULL, ?)
+  `, [ctx.from.id, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance, tier.balance, NULL, Date.now()], r));
 
   await new Promise(r => db.run('DELETE FROM positions WHERE user_id = ?', [ctx.from.id], r));
 
