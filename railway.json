@@ -1,0 +1,6 @@
+{
+  "build": {
+    "builder": "nixpacks"
+  },
+  "start": "node bot.js"  // or whatever your file is, e.g., "npm start"
+}
