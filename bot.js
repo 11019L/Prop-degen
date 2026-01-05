@@ -1275,19 +1275,59 @@ setInterval(async () => {
   }
 }, 3600000); // Every hour
 
-bot.telegram.deleteWebhook({ drop_pending_updates: true }).then(() => {
-  console.log('Old webhook cleared');
-  bot.launch({ dropPendingUpdates: true }).then(() => {
-    console.log('Bot launched with polling!');
-  });
-}).catch(() => {
-  bot.launch({ dropPendingUpdates: true });
+const PORT = process.env.PORT || 3000;
+
+// Railway gives you a public URL like https://your-project.up.railway.app
+// We construct the webhook URL automatically
+const RAILWAY_PUBLIC_URL = process.env.RAILWAY_PUBLIC_DOMAIN 
+  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+  : process.env.PUBLIC_URL;  // fallback if you set it manually
+
+if (!RAILWAY_PUBLIC_URL) {
+  console.error('ERROR: No public URL found! Set PUBLIC_URL in variables or wait for Railway to assign domain.');
+  process.exit(1);
+}
+
+const WEBHOOK_URL = `${RAILWAY_PUBLIC_URL}/bot`;
+const SECRET_TOKEN = process.env.WEBHOOK_SECRET_TOKEN || 'super-secret-token-change-me';
+
+// Launch with webhook
+bot.launch({
+  webhook: {
+    domain: RAILWAY_PUBLIC_URL,
+    hookPath: '/bot',
+    port: PORT,
+    secretToken: SECRET_TOKEN
+  }
+}).then(() => {
+  console.log('🚀 Bot launched with WEBHOOK!');
+  console.log('Webhook URL:', WEBHOOK_URL);
+  console.log('Public Domain:', RAILWAY_PUBLIC_URL);
 });
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+// Handle incoming updates
+app.post('/bot', bot.webhookCallback('/bot'));
 
-const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Crucible Bot Alive'));
-app.get('/health', (req, res) => res.send('OK'));
-app.listen(PORT, () => console.log(`Server on port ${PORT}`));
+// Health checks
+app.get('/', (req, res) => {
+  res.send('Crucible Bot Running - Webhook Active ✅');
+});
+
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
+});
+
+// Optional: Debug endpoint (remove in production)
+app.get('/webhook-info', async (req, res) => {
+  try {
+    const info = await bot.telegram.getWebhookInfo();
+    res.json(info);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Express server listening on port ${PORT}`);
+  console.log(`Visit ${WEBHOOK_URL} (Telegram posts here)`);
+});
