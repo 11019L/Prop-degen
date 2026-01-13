@@ -466,7 +466,7 @@ Paste any Solana CA to buy
 
 // === BOT COMMANDS ===
 bot.command('generate_code', async ctx => {
-  if (ctx.from.id !== ADMIN_ID) return ctx.reply('Admin only');
+  // if (ctx.from.id !== ADMIN_ID) return ctx.reply('Admin only');
   const code = Math.random().toString(36).substring(2, 8).toUpperCase();
   await new Promise(r => db.run('INSERT OR REPLACE INTO influencers (influencer_id, referral_code) VALUES (?, ?)', [ctx.from.id, code], r));
   ctx.replyWithMarkdownV2(esc(`Code: \`${code}\`\nLink: t.me/${ctx.botInfo.username}?start=${code}`));
