@@ -500,14 +500,14 @@ bot.start(async ctx => {
     "Live sniping channel: @Crucibleprop",
     {
       reply_markup: {
-      inline_keyboard: [
-      [{ text: "Join Winners Only", url: "https://t.me/Crucibleprop" }]
+        inline_keyboard: [
+          [{ text: "Join Winners Only", url: "https://t.me/Crucibleprop" }]
         ]
       }
     }
   );
 
-  // === FREE ACCOUNT HANDLER — Multiple Tiers ===
+  // === FREE ACCOUNT HANDLER — One-time per user ===
   let tierKey = null;
 
   if (payload === 'free200') tierKey = 20;
@@ -523,8 +523,46 @@ bot.start(async ctx => {
       return ctx.reply('❌ Invalid free tier. Contact admin.');
     }
 
+    // ────────────────────────────────────────────────
+    //   CHECK IF THIS USER HAS EVER ACTIVATED A CHALLENGE
+    // ────────────────────────────────────────────────
+    const hasUsedFreeBefore = await new Promise(resolve => {
+      db.get(
+        `SELECT 1 FROM users 
+         WHERE user_id = ? 
+         AND paid = 1 
+         LIMIT 1`,
+        [userId],
+        (_, row) => resolve(!!row)
+      );
+    });
+
+    if (hasUsedFreeBefore) {
+      return ctx.replyWithMarkdownV2(
+        esc(`
+❌ Free challenge already used
+
+You have already activated a free account.
+
+Free trials are one-time only per user.
+
+Please choose a paid challenge to continue trading.
+        `.trim()),
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "Get Paid Challenge", url: "https://t.me/" + ctx.botInfo.username + "?start=purchase" }]
+              // ↑ adjust the URL or remove button if you don't have a purchase flow yet
+            ]
+          }
+        }
+      );
+    }
+
+    // ────────────────────────────────────────────────
+    //   User is eligible → activate the free account
+    // ────────────────────────────────────────────────
     try {
-      // Clear old data and activate free account
       await new Promise((resolve, reject) => {
         db.run('BEGIN TRANSACTION', err => {
           if (err) return reject(err);
@@ -533,9 +571,10 @@ bot.start(async ctx => {
             INSERT OR REPLACE INTO users 
             (user_id, paid, balance, start_balance, target, bounty, failed, peak_equity, realized_peak, entry_fee, created_at)
             VALUES (?, 1, ?, ?, ?, ?, 0, ?, ?, NULL, ?)
-          `, [userId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance, tier.balance, Date.now()], err => {
-            if (err) reject(err);
-          });
+          `,
+            [userId, tier.balance, tier.balance, tier.target, tier.bounty, tier.balance, tier.balance, Date.now()],
+            err => { if (err) reject(err); }
+          );
 
           db.run('DELETE FROM positions WHERE user_id = ?', [userId], err => {
             if (err) reject(err);
@@ -545,15 +584,19 @@ bot.start(async ctx => {
         });
       });
 
-      // Success message with correct tier details
+      // Success message
       await ctx.replyWithMarkdownV2(
-        `*FREE $${tier.balance} CHALLENGE ACTIVATED* 🎉\n\n` +
-        `Capital: $${tier.balance}\n` +
-        `Profit Target: $${tier.target}\n` +
-        `Bounty: $${tier.bounty}\n` +
-        `Max Drawdown: ${MAX_DRAWDOWN_PERCENT}%\n\n` +
-        "Paste any Solana token CA to start trading\\!\n" +
-        "Good luck — survive or die\\.",
+        esc(`
+*FREE $${tier.balance} CHALLENGE ACTIVATED* 🎉
+
+Capital: $${tier.balance}
+Profit Target: $${tier.target}
+Bounty: $${tier.bounty}
+Max Drawdown: ${MAX_DRAWDOWN_PERCENT}%
+
+Paste any Solana CA to start trading!
+Good luck — survive or die.
+        `.trim()),
         {
           reply_markup: {
             inline_keyboard: [
@@ -563,6 +606,12 @@ bot.start(async ctx => {
         }
       );
 
+      // Optional: notify admin
+      await bot.telegram.sendMessage(
+        ADMIN_ID,
+        `New free challenge: User ${userId} activated $${tier.balance} tier via deep link`
+      ).catch(() => {});
+
     } catch (error) {
       console.error('Free account activation failed:', error);
       await ctx.reply('❌ Failed to activate free account. Try again later.');
@@ -570,6 +619,8 @@ bot.start(async ctx => {
 
     return;
   }
+
+  // If no free tier payload → just show welcome (or handle other deep links if you have them)
 });
 
 bot.command('admin_test', async ctx => {
