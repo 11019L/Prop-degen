@@ -64,6 +64,15 @@ db.serialize(() => {
     decimals INTEGER DEFAULT 9,
     created_at INTEGER
   )`);
+  db.run(`CREATE TABLE IF NOT EXISTS referral_clicks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    influencer_id INTEGER,
+    user_id INTEGER UNIQUE,          -- one click per user
+    referral_code TEXT,
+    clicked_at INTEGER,
+    converted INTEGER DEFAULT 0,     -- 0 = just clicked, 1 = later paid
+    pay_amount REAL DEFAULT 0
+  )`);
   db.run(`CREATE TABLE IF NOT EXISTS influencers (
     influencer_id INTEGER PRIMARY KEY,
     referral_code TEXT UNIQUE,
@@ -83,6 +92,7 @@ db.serialize(() => {
   db.run('ALTER TABLE users ADD COLUMN payout_address TEXT', () => {});
   db.run('ALTER TABLE users ADD COLUMN payout_tx TEXT', () => {});
   db.run('ALTER TABLE users ADD COLUMN payout_sent INTEGER DEFAULT 0', () => {});
+  db.run('ALTER TABLE users ADD COLUMN referral_code TEXT', () => {});
 });
 
 // Backward compatibility
@@ -346,18 +356,37 @@ app.post('/helius-webhook', express.raw({ type: 'application/json' }), async (re
 
       // Find which pending user this matches
       let fundedUserId = null;
-      for (const [userId, data] of pendingPayments.entries()) {
-        if (data.payAmount === matchedPay && !data.confirmed) {
-          fundedUserId = Number(userId);
-          data.confirmed = true;
-          break;
-        }
-      }
+for (const [userId, data] of pendingPayments.entries()) {
+  if (data.payAmount === matchedPay && !data.confirmed) {
+    fundedUserId = Number(userId);
+    data.confirmed = true;
+    break;
+  }
+}
 
-      if (!fundedUserId) {
-        console.log(`Payment received ($${matchedPay}) but no pending user`);
-        continue;
-      }
+if (!fundedUserId) {
+  console.log(`Payment received ($${matchedPay}) but no pending user`);
+  continue;
+}
+
+// ────────────────────────────────────────────────
+//   MARK REFERRAL AS CONVERTED (if they used a ref link)
+// ────────────────────────────────────────────────
+db.run(
+  `UPDATE referral_clicks 
+   SET converted = 1, 
+       pay_amount = ? 
+   WHERE user_id = ? 
+     AND converted = 0`,
+  [matchedPay, fundedUserId],
+  function (err) {
+    if (err) {
+      console.error('Failed to update referral conversion:', err);
+    } else if (this.changes > 0) {
+      console.log(`Referral marked as converted: user ${fundedUserId} paid $${matchedPay}`);
+    }
+  }
+);
 
       // === AUTO-FUND THE ACCOUNT ===
       const tier = TIERS[matchedPay];
@@ -417,19 +446,60 @@ app.post('/create-funded-wallet', async (req, res) => {
     if (!tier) return res.status(400).json({ok: false});
 
     let commissionPaid = false;
+
+    // ────────────────────────────────────────────────
+    //   Process referral commission (your existing logic)
+    // ────────────────────────────────────────────────
     if (referralCode) {
-      const influencer = await new Promise(r => db.get('SELECT influencer_id FROM influencers WHERE referral_code = ?', [referralCode], (_, row) => r(row)));
+      const influencer = await new Promise(r => 
+        db.get('SELECT influencer_id FROM influencers WHERE referral_code = ?', [referralCode], (_, row) => r(row))
+      );
+
       if (influencer) {
-        const already = await new Promise(r => db.get('SELECT 1 FROM referrals WHERE influencer_id = ? AND user_id = ?', [influencer.influencer_id, userId], (_, row) => r(row)));
+        const already = await new Promise(r => 
+          db.get('SELECT 1 FROM referrals WHERE influencer_id = ? AND user_id = ?', 
+            [influencer.influencer_id, userId], (_, row) => r(!!row))
+        );
+
         if (!already) {
           const commission = payAmount * 0.20;
-          await new Promise(r => db.run('UPDATE influencers SET total_earnings = total_earnings + ? WHERE influencer_id = ?', [commission, influencer.influencer_id], r));
-          await new Promise(r => db.run('INSERT INTO referrals (influencer_id, user_id, pay_amount, date) VALUES (?, ?, ?, ?)', [influencer.influencer_id, userId, payAmount, Date.now()], r));
+          await new Promise(r => 
+            db.run('UPDATE influencers SET total_earnings = total_earnings + ? WHERE influencer_id = ?', 
+              [commission, influencer.influencer_id], r)
+          );
+          await new Promise(r => 
+            db.run('INSERT INTO referrals (influencer_id, user_id, pay_amount, date) VALUES (?, ?, ?, ?)', 
+              [influencer.influencer_id, userId, payAmount, Date.now()], r)
+          );
           commissionPaid = true;
+          console.log(`Commission ${commission} paid via /create-funded-wallet for user ${userId}`);
         }
       }
     }
 
+    // ────────────────────────────────────────────────
+    //   MARK REFERRAL CLICK AS CONVERTED (paid)
+    //   — this makes /influencer show accurate conversions
+    // ────────────────────────────────────────────────
+    db.run(
+      `UPDATE referral_clicks 
+       SET converted = 1, 
+           pay_amount = ? 
+       WHERE user_id = ? 
+         AND converted = 0`,
+      [payAmount, userId],
+      function (err) {
+        if (err) {
+          console.error('Failed to mark referral as converted in /create-funded-wallet:', err);
+        } else if (this.changes > 0) {
+          console.log(`Referral conversion recorded via /create-funded-wallet: user ${userId} paid $${payAmount}`);
+        }
+      }
+    );
+
+    // ────────────────────────────────────────────────
+    //   Fund the user (your existing DB logic)
+    // ────────────────────────────────────────────────
     await new Promise((resolve, reject) => {
       db.run('BEGIN TRANSACTION');
       db.run(`INSERT OR REPLACE INTO users 
@@ -442,7 +512,13 @@ app.post('/create-funded-wallet', async (req, res) => {
       db.run('COMMIT', resolve);
     });
 
-    await bot.telegram.sendMessage(ADMIN_ID, `NEW PAID $${payAmount} → $${tier.balance} | User: ${userId}`);
+    // ────────────────────────────────────────────────
+    //   Notifications (unchanged)
+    // ────────────────────────────────────────────────
+    await bot.telegram.sendMessage(ADMIN_ID, 
+      `NEW PAID $${payAmount} → $${tier.balance} | User: ${userId}${commissionPaid ? ' (commission paid)' : ''}`
+    );
+
     await bot.telegram.sendMessage(userId, esc(`
 CHALLENGE STARTED
 
@@ -458,8 +534,9 @@ Paste any Solana CA to buy
 
     userLastActivity.set(userId, Date.now());
     res.json({ok: true, commission: commissionPaid});
+
   } catch (e) {
-    console.error('Webhook error:', e);
+    console.error('Webhook error in /create-funded-wallet:', e);
     res.status(500).json({ok: false});
   }
 });
@@ -473,24 +550,106 @@ bot.command('generate_code', async ctx => {
 });
 
 bot.command('influencer', async ctx => {
-  const info = await new Promise(r => db.get('SELECT referral_code, total_earnings FROM influencers WHERE influencer_id = ?', [ctx.from.id], (_, row) => r(row)));
-  if (!info) return ctx.reply('Not an influencer');
+  const userId = ctx.from.id;
 
-  const totalReferred = await new Promise(r => db.get('SELECT COUNT(*) as c FROM referrals WHERE influencer_id = ?', [ctx.from.id], (_, row) => r(row?.c || 0)));
-  const recent = await new Promise(r => db.all(`SELECT DATE(datetime(date/1000,'unixepoch')) as d, COUNT(*) as cnt, SUM(pay_amount)*0.2 as earned
-    FROM referrals WHERE influencer_id = ? GROUP BY d ORDER BY d DESC LIMIT 7`, [ctx.from.id], (_, rows) => r(rows || [])));
+  const info = await new Promise(r => 
+    db.get(
+      `SELECT referral_code, total_earnings 
+       FROM influencers 
+       WHERE influencer_id = ?`,
+      [userId],
+      (_, row) => r(row)
+    )
+  );
 
-  let msg = `*INFLUENCER DASHBOARD*\n\nCode: \`${info.referral_code}\`\nEarnings: $${info.total_earnings.toFixed(2)}\nReferred: ${totalReferred}\n\nLink: t.me/${ctx.botInfo.username}?start=${info.referral_code}`;
-  if (recent.length) {
-    msg += `\n\n*Last 7 Days*\n`;
-    recent.forEach(r => msg += `${r.d}: $${r.earned.toFixed(2)} (${r.cnt} users)\n`);
+  if (!info) return ctx.reply('You are not registered as an influencer.');
+
+  const stats = await new Promise(r => 
+    db.get(
+      `SELECT 
+         COUNT(*) as total_clicks,
+         SUM(CASE WHEN converted = 1 THEN 1 ELSE 0 END) as conversions,
+         SUM(pay_amount) as total_paid_amount
+       FROM referral_clicks 
+       WHERE influencer_id = ?`,
+      [userId],
+      (_, row) => r(row || { total_clicks: 0, conversions: 0, total_paid_amount: 0 })
+    )
+  );
+
+  const recent = await new Promise(r => 
+    db.all(
+      `SELECT DATE(clicked_at/1000, 'unixepoch') as d, 
+              COUNT(*) as clicks,
+              SUM(CASE WHEN converted=1 THEN 1 ELSE 0 END) as conv,
+              SUM(pay_amount) as earned_base
+       FROM referral_clicks 
+       WHERE influencer_id = ? 
+       GROUP BY d 
+       ORDER BY d DESC 
+       LIMIT 7`,
+      [userId],
+      (_, rows) => r(rows || [])
+    )
+  );
+
+  let msg = `*INFLUENCER DASHBOARD*\n\n` +
+    `Code: \`${info.referral_code}\`\n` +
+    `Total earnings (commissions): $${info.total_earnings.toFixed(2)}\n\n` +
+    `Referral stats:\n` +
+    `• Total clicks/starts: ${stats.total_clicks}\n` +
+    `• Conversions (paid): ${stats.conversions}\n` +
+    `• Conversion rate: ${stats.total_clicks > 0 ? ((stats.conversions / stats.total_clicks) * 100).toFixed(1) : 0}%\n` +
+    `• Total paid volume: $${stats.total_paid_amount.toFixed(2)}\n\n` +
+    `Your link: t.me/${ctx.botInfo.username}?start=${info.referral_code}`;
+
+  if (recent.length > 0) {
+    msg += `\n\n*Last 7 days*\n`;
+    recent.forEach(r => {
+      const earned = (r.earned_base || 0) * 0.20; // assuming 20% commission
+      msg += `${r.d}: ${r.clicks} clicks • ${r.conv} paid • $${earned.toFixed(2)}\n`;
+    });
   }
+
   ctx.replyWithMarkdownV2(esc(msg));
 });
 
 bot.start(async ctx => {
   const payload = ctx.startPayload || '';
+  const userId = ctx.from.id;
 
+  let referralCode = null;
+  let influencerId = null;
+
+  if (payload && /^[A-Z0-9]{4,10}$/i.test(payload)) {  // adjust regex to match your codes
+    referralCode = payload.toUpperCase();
+
+    // Find who owns this code
+    const row = await new Promise(r => 
+      db.get(
+        `SELECT influencer_id FROM influencers WHERE referral_code = ?`,
+        [referralCode],
+        (_, row) => r(row)
+      )
+    );
+
+    if (row) {
+      influencerId = row.influencer_id;
+
+      // Record the click (only once per user)
+      db.run(
+        `INSERT OR IGNORE INTO referral_clicks 
+         (influencer_id, user_id, referral_code, clicked_at)
+         VALUES (?, ?, ?, ?)`,
+        [influencerId, userId, referralCode, Date.now()],
+        function(err) {
+          if (!err && this.changes > 0) {
+            console.log(`Referral click recorded: ${userId} via ${referralCode}`);
+          }
+        }
+      );
+    }
+  }
   // === MAIN WELCOME MESSAGE (always shown) ===
   await ctx.replyWithMarkdownV2(
     "*CRUCIBLE — SOLANA PROP FIRM*\n\n" +
